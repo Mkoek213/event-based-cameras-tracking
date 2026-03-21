@@ -1,3 +1,18 @@
+# Project-specific: large data / model / experiment artefacts
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/datasets/*
+!data/datasets/.gitkeep
+models/checkpoints/*
+!models/checkpoints/.gitkeep
+models/pretrained/*
+!models/pretrained/.gitkeep
+experiments/logs/*
+!experiments/logs/.gitkeep
+results/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
