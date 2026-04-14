@@ -3,12 +3,16 @@ data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
-data/datasets/*
+data/datasets/**
 !data/datasets/.gitkeep
+!data/datasets/**/
+!data/datasets/**/.gitkeep
+!data/datasets/**/README.md
 models/checkpoints/*
 !models/checkpoints/.gitkeep
 models/pretrained/*
 !models/pretrained/.gitkeep
+external/models/
 experiments/logs/*
 !experiments/logs/.gitkeep
 results/
@@ -220,3 +224,29 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+articles/
+
+# Codex / local agent state
+.codex
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+
+# Local generated videos / visualisations if they ever escape results/
+*.avi
+*.mp4
+
+# External benchmark / evaluator runtime outputs
+external/TrackEval/data/
+external/TrackEval/results/
+external/TrackEval/output/
+
+# Possible evrt-detr training outputs
+external/evrt-detr/outputs/
+external/evrt-detr/runs/
+external/evrt-detr/wandb/
+
+# Local notes / scratch
+tmp/
+scratch/

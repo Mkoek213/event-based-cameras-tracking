@@ -9,9 +9,8 @@
 
 ```
 event-based-cameras-tracking/
-├── configs/                   # Hydra / OmegaConf configuration files
-│   ├── base_config.yaml       # Shared default settings
-│   └── experiments/           # Per-experiment config overrides
+├── configs/                   # Configuration files for active experiments
+│   └── experiments/
 ├── data/                      # Data storage (NOT committed to Git)
 │   ├── raw/                   # Raw event recordings (.dat, .raw, .h5)
 │   ├── processed/             # Preprocessed event tensors / frames
@@ -20,39 +19,31 @@ event-based-cameras-tracking/
 │   ├── architecture.md        # Directory structure & design decisions
 │   └── setup.md               # Environment setup instructions
 ├── experiments/               # Experiment artefacts (NOT committed to Git)
-│   └── logs/                  # TensorBoard / MLflow logs
+│   └── logs/
 ├── models/                    # Model weights (NOT committed to Git)
-│   ├── checkpoints/           # Training checkpoints
-│   └── pretrained/            # Pre-trained backbone weights
+│   ├── checkpoints/
+│   └── pretrained/
 ├── notebooks/                 # Jupyter notebooks for data exploration
 │   └── exploration/
 ├── scripts/                   # Entry-point scripts
-│   ├── train.py               # Start a training run
-│   ├── evaluate.py            # Evaluate a checkpoint
-│   └── inference.py           # Run inference on new data
+│   ├── convert_dsec_mot_to_evrtdetr_npz.py
+│   ├── run_evrtdetr_dsec_mot.py
+│   ├── export_evrtdetr_dsec_mot.py
+│   ├── evaluate_evrtdetr_dsec_mot_trackeval.py
+│   ├── run_simple_tracker_dsec_mot.py
+│   ├── render_dsec_mot_video.py
+│   └── validate_dsec_mot.py
 ├── src/                       # Importable Python package
 │   ├── data/                  # Dataset classes & preprocessing transforms
 │   │   ├── dataset.py
 │   │   └── preprocessing.py
-│   ├── models/                # Backbone, detector, and tracker
-│   │   ├── backbone.py
-│   │   ├── detector.py
-│   │   └── tracker.py
+│   ├── evaluation/            # DSEC-MOT export / tracking / TrackEval glue
 │   ├── utils/                 # Metrics, visualisation, I/O helpers
 │   │   ├── metrics.py
-│   │   ├── visualization.py
 │   │   └── io.py
-│   ├── training/              # Trainer loop & loss functions
-│   │   ├── trainer.py
-│   │   └── losses.py
-│   └── evaluation/            # Evaluation pipeline
-│       └── evaluator.py
 └── tests/                     # Pytest unit tests (mirrors src/)
     ├── test_data/
-    ├── test_models/
-    ├── test_utils/
-    ├── test_training/
-    └── test_evaluation/
+    └── test_utils/
 ```
 
 ---
@@ -66,15 +57,17 @@ cd event-based-cameras-tracking
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install -e .
 
-# 2. Train
-python scripts/train.py --config configs/base_config.yaml
+# 2. Validate local DSEC-MOT layout
+.venv/bin/python scripts/validate_dsec_mot.py
 
-# 3. Evaluate
-python scripts/evaluate.py --config configs/base_config.yaml \
-    --checkpoint models/checkpoints/checkpoint_epoch_0100.pt
+# 3. Run the public pretrained EvRT-DETR checkpoint on a DSEC-MOT sequence
+.venv/bin/python scripts/run_evrtdetr_dsec_mot.py \
+    --split test \
+    --sequence interlaken_00_d \
+    --max-frames 100
 
 # 4. Run tests
-pytest
+.venv/bin/python -m pytest
 ```
 
 See [docs/setup.md](docs/setup.md) for detailed setup instructions and
