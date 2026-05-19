@@ -14,22 +14,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from visualize_dsec_mot_samples import (
-    CLASS_NAMES,
-    EVENT_HEIGHT,
-    EVENT_WIDTH,
-    build_event_frame,
-    build_timestamp_to_png,
-    group_annotations_by_timestamp,
-    import_or_die,
-    load_annotations,
-    load_event_file,
-    load_image_timestamps,
-    timestamp_window_indices,
-)
-
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.data.dataset import EVENT_HEIGHT, EVENT_WIDTH, _import_h5, _timestamp_window_indices
+from src.evaluation.detection_export import CLASS_NAMES, load_annotations, load_image_timestamps, load_event_file
+
 EVRT_DETR_ROOT = REPO_ROOT / "external" / "evrt-detr"
 DEFAULT_MODEL_ROOT = REPO_ROOT / "external" / "models" / "evrt-detr" / "gen4_frame_rtdetr_presnet50"
 
@@ -69,6 +60,49 @@ class Prediction:
     label: int
     score: float
     box: tuple[float, float, float, float]
+
+
+def group_annotations_by_timestamp(annotations) -> dict[int, list]:
+    grouped: dict[int, list] = {}
+    for annotation in annotations:
+        grouped.setdefault(annotation.timestamp, []).append(annotation)
+    return grouped
+
+
+def build_timestamp_to_png(seq_dir: Path, sequence: str) -> dict[int, Path]:
+    timestamps = load_image_timestamps(seq_dir / f"{sequence}_image_timestamps.txt")
+    png_paths = sorted((seq_dir / "images_rectified_left").glob("*.png"))
+    if len(timestamps) != len(png_paths):
+        raise SystemExit(
+            f"Mismatch between timestamps ({len(timestamps)}) and PNGs ({len(png_paths)}) in {seq_dir / 'images_rectified_left'}"
+        )
+    return dict(zip(timestamps, png_paths))
+
+
+def timestamp_window_indices(ms_to_idx, t, t_offset: int, start_us: int, end_us: int, np_mod):
+    return _timestamp_window_indices(ms_to_idx, t, t_offset, start_us, end_us)
+
+
+def build_event_frame(x, y, p, t, ms_to_idx, t_offset: int, timestamp_us: int, window_us: int, np_mod) -> np.ndarray:
+    start_us = timestamp_us - window_us
+    start_idx, end_idx = _timestamp_window_indices(ms_to_idx, t, t_offset, start_us, timestamp_us)
+    frame = np_mod.zeros((EVENT_HEIGHT, EVENT_WIDTH, 3), dtype=np_mod.uint8)
+    if end_idx <= start_idx:
+        return frame
+
+    xs = x[start_idx:end_idx].astype(np_mod.int32)
+    ys = y[start_idx:end_idx].astype(np_mod.int32)
+    ps = p[start_idx:end_idx].astype(np_mod.bool_)
+    valid = (xs >= 0) & (xs < EVENT_WIDTH) & (ys >= 0) & (ys < EVENT_HEIGHT)
+    if not np_mod.any(valid):
+        return frame
+
+    xs = xs[valid]
+    ys = ys[valid]
+    ps = ps[valid]
+    frame[ys[ps], xs[ps], 1] = 255
+    frame[ys[~ps], xs[~ps], 2] = 255
+    return frame
 
 
 def parse_args() -> argparse.Namespace:
@@ -465,7 +499,7 @@ def default_output_path(split: str, sequence: str) -> Path:
 
 def main() -> int:
     args = parse_args()
-    h5py, np_h5, _image, _image_draw = import_or_die()
+    _h5py, np_h5 = _import_h5()
 
     seq_dir = args.root / args.split / args.sequence
     annotation_path = args.root / "annotations" / args.split / f"{args.sequence}.txt"
@@ -506,7 +540,7 @@ def main() -> int:
         raise SystemExit(f"Could not open video writer for {output_path}")
 
     window_us = int(args.window_ms * 1000)
-    handle, x, y, p, t, ms_to_idx, t_offset = load_event_file({"events_h5": events_h5}, h5py)
+    handle, x, y, p, t, ms_to_idx, t_offset, _ = load_event_file(events_h5)
     model_label = model.model_dir.name
     try:
         total = len(timestamps)
