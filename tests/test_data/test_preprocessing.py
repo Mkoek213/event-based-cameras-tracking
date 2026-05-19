@@ -58,3 +58,41 @@ class TestEventDataset:
 
         ds = EventDataset(root=tmp_path)
         assert len(ds) == 0
+
+    def test_encode_targets_uses_center_cell_only_when_radius_zero(self, tmp_path):
+        from src.data.dataset import Annotation, EventDataset
+
+        ds = EventDataset(root=tmp_path, feature_stride=8, positive_radius=0)
+        annotation = Annotation(
+            timestamp=0,
+            track_id=1,
+            left=100.0,
+            top=120.0,
+            width=80.0,
+            height=64.0,
+            class_id=2,
+        )
+
+        cls_targets, _, pos_mask = ds._encode_targets([annotation])
+
+        assert int(pos_mask.sum()) == 1
+        gy, gx = np.argwhere(pos_mask)[0]
+        assert cls_targets[gy, gx] == annotation.class_id + ds.class_offset
+
+    def test_encode_targets_respects_explicit_positive_radius(self, tmp_path):
+        from src.data.dataset import Annotation, EventDataset
+
+        ds = EventDataset(root=tmp_path, feature_stride=8, positive_radius=1)
+        annotation = Annotation(
+            timestamp=0,
+            track_id=1,
+            left=100.0,
+            top=120.0,
+            width=80.0,
+            height=64.0,
+            class_id=2,
+        )
+
+        _, _, pos_mask = ds._encode_targets([annotation])
+
+        assert int(pos_mask.sum()) == 9
