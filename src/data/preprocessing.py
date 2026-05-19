@@ -75,16 +75,17 @@ class EventPreprocessor:
         return surface
 
     def _to_voxel_grid(self, events: np.ndarray) -> np.ndarray:
-        """Temporal voxel grid with *num_bins* time slices."""
-        grid = np.zeros((self.num_bins, self.height, self.width), dtype=np.float32)
+        """Temporal polarity-aware voxel grid with *2*num_bins* channels."""
+        grid = np.zeros((2, self.num_bins, self.height, self.width), dtype=np.float32)
         if events.size == 0:
-            return grid
+            return grid.reshape((2 * self.num_bins, self.height, self.width))
         t = events["t"].astype(np.float64)
         t_min, t_max = t.min(), t.max()
         dt = t_max - t_min if t_max > t_min else 1.0
         bins = ((t - t_min) / dt * (self.num_bins - 1)).astype(int).clip(0, self.num_bins - 1)
         x = events["x"].astype(int)
         y = events["y"].astype(int)
+        p = events["p"].astype(int)
         mask = (x >= 0) & (x < self.width) & (y >= 0) & (y < self.height)
-        np.add.at(grid, (bins[mask], y[mask], x[mask]), 1)
-        return grid
+        np.add.at(grid, (p[mask], bins[mask], y[mask], x[mask]), 1)
+        return grid.reshape((2 * self.num_bins, self.height, self.width))
