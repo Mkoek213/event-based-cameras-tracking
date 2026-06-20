@@ -1,0 +1,43 @@
+default_language_version:
+  python: python3
+
+exclude: |
+  (?x)^(
+    \.venv/|
+    data/|
+    runs/|
+    results/|
+    external/|
+    articles/|
+    autoresearch/|
+    obsidian-wiki/|
+    _INZ27__MK__DVS_Tracking/
+  )
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-ast
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: debug-statements
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        files: ^(src|tests)/.*\.py$
+        args: [--fix]
+      - id: ruff-format
+        files: ^(src|tests)/.*\.py$
