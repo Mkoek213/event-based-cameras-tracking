@@ -104,3 +104,34 @@ Car-only benchmark:
 ```bash
 .venv/bin/python -m pytest
 ```
+
+## Pre-commit Hooks
+
+The repository uses `pre-commit` for lightweight checks before commits:
+
+- whitespace and end-of-file cleanup,
+- YAML/TOML/JSON sanity checks,
+- merge-conflict and private-key detection,
+- Python syntax checks,
+- `ruff` linting with safe fixes,
+- `ruff-format` formatting.
+
+Install the hooks once after setting up the virtual environment:
+
+```bash
+.venv/bin/python -m pre_commit install
+```
+
+Run the same checks manually on all tracked files:
+
+```bash
+.venv/bin/python -m pre_commit run --all-files
+```
+
+For a faster Python-only check during development, run Ruff on the active
+package code and tests:
+
+```bash
+.venv/bin/python -m ruff check src tests
+.venv/bin/python -m ruff format src tests
+```
