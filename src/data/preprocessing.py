@@ -9,9 +9,9 @@ class EventPreprocessor:
     """Converts a raw event array into a fixed-size tensor representation.
 
     Supported representations:
-        - ``"event_frame"``: polarity-split 2-D histogram (H × W × 2)
-        - ``"time_surface"``: most-recent timestamp surface (H × W × 2)
-        - ``"voxel_grid"``: temporal voxel grid (B × H × W)
+        - ``"event_frame"``: polarity-split 2-D histogram (2 × H × W)
+        - ``"time_surface"``: most-recent timestamp surface (2 × H × W)
+        - ``"voxel_grid"``: polarity-aware temporal voxel grid (2B × H × W)
     """
 
     REPRESENTATIONS = ("event_frame", "time_surface", "voxel_grid")
@@ -28,6 +28,8 @@ class EventPreprocessor:
                 f"Unknown representation '{representation}'. "
                 f"Choose one of {self.REPRESENTATIONS}."
             )
+        if num_bins <= 0:
+            raise ValueError("num_bins must be positive.")
         self.height = height
         self.width = width
         self.representation = representation
@@ -55,7 +57,7 @@ class EventPreprocessor:
         y = events["y"].astype(int)
         p = events["p"].astype(int)
         mask = (x >= 0) & (x < self.width) & (y >= 0) & (y < self.height)
-        np.add.at(frame[p[mask]], (y[mask], x[mask]), 1)
+        np.add.at(frame, (p[mask], y[mask], x[mask]), 1)
         return frame
 
     def _to_time_surface(self, events: np.ndarray) -> np.ndarray:
