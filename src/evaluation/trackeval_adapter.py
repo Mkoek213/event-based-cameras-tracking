@@ -13,7 +13,6 @@ import numpy as np
 from src.data.dataset import EVENT_HEIGHT, EVENT_WIDTH
 from src.evaluation.detection_export import load_annotations, load_image_timestamps
 
-
 TRACKEVAL_CLASS_ID_TO_NAME = {
     1: "car",
     2: "pedestrian",
@@ -42,6 +41,8 @@ def _to_builtin(value):
         return [_to_builtin(item) for item in value]
     if isinstance(value, tuple):
         return [_to_builtin(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _to_builtin(value.tolist())
     if isinstance(value, np.generic):
         return value.item()
     return value
@@ -52,7 +53,8 @@ def ensure_trackeval_importable(trackeval_root: Path | None = None):
     root = trackeval_root or Path("external/TrackEval")
     if not root.exists():
         raise FileNotFoundError(
-            f"TrackEval checkout not found at {root}. Clone https://github.com/JonathonLuiten/TrackEval into external/TrackEval first."
+            f"TrackEval checkout not found at {root}. Clone "
+            "https://github.com/JonathonLuiten/TrackEval into external/TrackEval first."
         )
     root_resolved = str(root.resolve())
     if root_resolved not in sys.path:
@@ -90,7 +92,9 @@ class DSECMOTTrackEvalDataset:
         super_class = _BaseDataset
         super_class.__init__(self)
 
-        self.config = trackeval.utils.init_config(config, self.get_default_dataset_config(), self.get_name())
+        self.config = trackeval.utils.init_config(
+            config, self.get_default_dataset_config(), self.get_name()
+        )
         self.should_classes_combine = True
         self.use_super_categories = False
 
@@ -103,21 +107,31 @@ class DSECMOTTrackEvalDataset:
         self.output_sub_fol = self.config["OUTPUT_SUB_FOLDER"]
 
         self.valid_classes = TRACKEVAL_CLASS_NAMES
-        self.class_list = [cls.lower() if cls.lower() in self.valid_classes else None for cls in self.config["CLASSES_TO_EVAL"]]
+        self.class_list = [
+            cls.lower() if cls.lower() in self.valid_classes else None
+            for cls in self.config["CLASSES_TO_EVAL"]
+        ]
         if not all(self.class_list):
             raise trackeval.utils.TrackEvalException(
-                f"Attempted to evaluate invalid classes. Valid classes: {', '.join(self.valid_classes)}"
+                "Attempted to evaluate invalid classes. "
+                f"Valid classes: {', '.join(self.valid_classes)}"
             )
-        self.class_name_to_class_id = {name: class_id for class_id, name in TRACKEVAL_CLASS_ID_TO_NAME.items()}
+        self.class_name_to_class_id = {
+            name: class_id for class_id, name in TRACKEVAL_CLASS_ID_TO_NAME.items()
+        }
 
         self.seq_list, self.seq_lengths = self._get_seq_info()
         if not self.seq_list:
-            raise trackeval.utils.TrackEvalException("No sequences selected for DSEC-MOT evaluation.")
+            raise trackeval.utils.TrackEvalException(
+                "No sequences selected for DSEC-MOT evaluation."
+            )
 
         for seq in self.seq_list:
             gt_file = self.config["GT_LOC_FORMAT"].format(gt_folder=self.gt_fol, seq=seq)
             if not os.path.isfile(gt_file):
-                raise trackeval.utils.TrackEvalException(f"GT file not found for sequence {seq}: {gt_file}")
+                raise trackeval.utils.TrackEvalException(
+                    f"GT file not found for sequence {seq}: {gt_file}"
+                )
 
         if self.config["TRACKERS_TO_EVAL"] is None:
             self.tracker_list = sorted(os.listdir(self.tracker_fol))
@@ -127,15 +141,23 @@ class DSECMOTTrackEvalDataset:
         if self.config["TRACKER_DISPLAY_NAMES"] is None:
             self.tracker_to_disp = dict(zip(self.tracker_list, self.tracker_list))
         elif len(self.config["TRACKER_DISPLAY_NAMES"]) == len(self.tracker_list):
-            self.tracker_to_disp = dict(zip(self.tracker_list, self.config["TRACKER_DISPLAY_NAMES"]))
+            self.tracker_to_disp = dict(
+                zip(self.tracker_list, self.config["TRACKER_DISPLAY_NAMES"])
+            )
         else:
-            raise trackeval.utils.TrackEvalException("Tracker display names do not match trackers to eval.")
+            raise trackeval.utils.TrackEvalException(
+                "Tracker display names do not match trackers to eval."
+            )
 
         for tracker in self.tracker_list:
             for seq in self.seq_list:
-                tracker_file = os.path.join(self.tracker_fol, tracker, self.tracker_sub_fol, f"{seq}.txt")
+                tracker_file = os.path.join(
+                    self.tracker_fol, tracker, self.tracker_sub_fol, f"{seq}.txt"
+                )
                 if not os.path.isfile(tracker_file):
-                    raise trackeval.utils.TrackEvalException(f"Tracker file not found: {tracker_file}")
+                    raise trackeval.utils.TrackEvalException(
+                        f"Tracker file not found: {tracker_file}"
+                    )
 
     @classmethod
     def get_name(cls):
@@ -154,7 +176,11 @@ class DSECMOTTrackEvalDataset:
         trackeval = ensure_trackeval_importable()
         seqmap_file = self.config["SEQMAP_FILE"]
         if seqmap_file is None:
-            seqmap_file = os.path.join(self.config["GT_FOLDER"], "seqmaps", f"{self.config['BENCHMARK']}-{self.config['SPLIT_TO_EVAL']}.txt")
+            seqmap_file = os.path.join(
+                self.config["GT_FOLDER"],
+                "seqmaps",
+                f"{self.config['BENCHMARK']}-{self.config['SPLIT_TO_EVAL']}.txt",
+            )
         if not os.path.isfile(seqmap_file):
             raise trackeval.utils.TrackEvalException(f"Seqmap file not found: {seqmap_file}")
 
@@ -169,7 +195,9 @@ class DSECMOTTrackEvalDataset:
                 seq_list.append(seq)
                 seqinfo_path = Path(self.gt_fol) / seq / "seqinfo.ini"
                 if not seqinfo_path.exists():
-                    raise trackeval.utils.TrackEvalException(f"seqinfo.ini not found for {seq}: {seqinfo_path}")
+                    raise trackeval.utils.TrackEvalException(
+                        f"seqinfo.ini not found for {seq}: {seqinfo_path}"
+                    )
                 seq_lengths[seq] = _read_seq_length(seqinfo_path)
         return seq_list, seq_lengths
 
@@ -200,7 +228,8 @@ class DSECMOTTrackEvalDataset:
         if extra_time_keys:
             data_type = "Ground-truth" if is_gt else "Tracking"
             raise trackeval.utils.TrackEvalException(
-                f"{data_type} data contains invalid timesteps for seq {seq}: {', '.join(extra_time_keys)}"
+                f"{data_type} data contains invalid timesteps for seq {seq}: "
+                f"{', '.join(extra_time_keys)}"
             )
 
         for t in range(num_timesteps):
@@ -211,7 +240,8 @@ class DSECMOTTrackEvalDataset:
                 raw_data["ids"][t] = np.atleast_1d(time_data[:, 1]).astype(int)
                 if time_data.shape[1] < 8:
                     raise trackeval.utils.TrackEvalException(
-                        f"Expected 8 columns in DSEC-MOT TrackEval file for seq {seq}, frame {t + 1}."
+                        "Expected 8 columns in DSEC-MOT TrackEval file "
+                        f"for seq {seq}, frame {t + 1}."
                     )
                 raw_data["classes"][t] = np.atleast_1d(time_data[:, 7]).astype(int)
                 if is_gt:
@@ -258,7 +288,14 @@ class DSECMOTTrackEvalDataset:
         self._check_unique_ids(raw_data)
         cls_id = self.class_name_to_class_id[cls]
 
-        data_keys = ["gt_ids", "tracker_ids", "gt_dets", "tracker_dets", "tracker_confidences", "similarity_scores"]
+        data_keys = [
+            "gt_ids",
+            "tracker_ids",
+            "gt_dets",
+            "tracker_dets",
+            "tracker_confidences",
+            "similarity_scores",
+        ]
         data = {key: [None] * raw_data["num_timesteps"] for key in data_keys}
         unique_gt_ids: list[int] = []
         unique_tracker_ids: list[int] = []
@@ -274,7 +311,9 @@ class DSECMOTTrackEvalDataset:
             data["tracker_ids"][t] = raw_data["tracker_ids"][t][tracker_mask]
             data["tracker_dets"][t] = raw_data["tracker_dets"][t][tracker_mask]
             data["tracker_confidences"][t] = raw_data["tracker_confidences"][t][tracker_mask]
-            data["similarity_scores"][t] = raw_data["similarity_scores"][t][gt_mask][:, tracker_mask]
+            data["similarity_scores"][t] = raw_data["similarity_scores"][t][gt_mask][
+                :, tracker_mask
+            ]
 
             unique_gt_ids += list(np.unique(data["gt_ids"][t]))
             unique_tracker_ids += list(np.unique(data["tracker_ids"][t]))
@@ -344,15 +383,22 @@ def export_ground_truth_for_sequence(
     output_gt_path: Path,
     output_seqinfo_path: Path,
 ) -> None:
-    timestamps = load_image_timestamps(dataset_root / split / sequence / f"{sequence}_image_timestamps.txt")
-    timestamp_to_frame = {timestamp: frame_index + 1 for frame_index, timestamp in enumerate(timestamps)}
+    timestamps = load_image_timestamps(
+        dataset_root / split / sequence / f"{sequence}_image_timestamps.txt"
+    )
+    timestamp_to_frame = {
+        timestamp: frame_index + 1 for frame_index, timestamp in enumerate(timestamps)
+    }
     annotations = load_annotations(dataset_root / "annotations" / split / f"{sequence}.txt")
 
     output_gt_path.parent.mkdir(parents=True, exist_ok=True)
     with output_gt_path.open("wt", encoding="utf-8", newline="") as handle:
         for annotation in annotations:
             if annotation.timestamp not in timestamp_to_frame:
-                raise ValueError(f"Annotation timestamp {annotation.timestamp} does not map to an image frame in {sequence}")
+                raise ValueError(
+                    f"Annotation timestamp {annotation.timestamp} does not map "
+                    f"to an image frame in {sequence}"
+                )
             frame_index = timestamp_to_frame[annotation.timestamp]
             handle.write(
                 f"{frame_index},{annotation.track_id},{annotation.left:.3f},{annotation.top:.3f},"
@@ -395,7 +441,9 @@ def export_trackeval_bundle(
             raise FileNotFoundError(f"Tracker output not found for {sequence}: {source_track_file}")
         target_track_file = trackers_root / split_name / tracker_name / "data" / f"{sequence}.txt"
         target_track_file.parent.mkdir(parents=True, exist_ok=True)
-        target_track_file.write_text(source_track_file.read_text(encoding="utf-8"), encoding="utf-8")
+        target_track_file.write_text(
+            source_track_file.read_text(encoding="utf-8"), encoding="utf-8"
+        )
 
     return {
         "benchmark": benchmark_name,
@@ -412,6 +460,7 @@ def run_trackeval(
     output_root: Path,
     trackeval_root: Path | None = None,
     eval_iou_threshold: float = 0.5,
+    classes_to_eval: list[str] | None = None,
 ) -> tuple[dict, dict]:
     trackeval = ensure_trackeval_importable(trackeval_root)
 
@@ -436,7 +485,7 @@ def run_trackeval(
             "TRACKERS_FOLDER": bundle["trackers_folder"],
             "OUTPUT_FOLDER": str(output_root),
             "TRACKERS_TO_EVAL": [bundle["tracker_name"]],
-            "CLASSES_TO_EVAL": TRACKEVAL_CLASS_NAMES,
+            "CLASSES_TO_EVAL": classes_to_eval or TRACKEVAL_CLASS_NAMES,
             "BENCHMARK": bundle["benchmark"],
             "SPLIT_TO_EVAL": bundle["split"],
             "PRINT_CONFIG": False,
@@ -449,6 +498,7 @@ def run_trackeval(
     evaluator = trackeval.Evaluator(eval_config)
     dataset = DSECMOTTrackEvalDataset(dataset_config)
     metrics = [
+        trackeval.metrics.HOTA(metrics_config),
         trackeval.metrics.CLEAR(metrics_config),
         trackeval.metrics.Identity(metrics_config),
     ]
@@ -460,43 +510,66 @@ def summarise_trackeval_results(
     tracker_name: str,
     eval_iou_threshold: float = 0.5,
     trackeval_root: Path | None = None,
+    classes_to_eval: list[str] | None = None,
 ) -> dict:
     trackeval = ensure_trackeval_importable(trackeval_root)
     dataset_name = next(iter(results))
     tracker_results = results[dataset_name][tracker_name]
 
     clear_metric = trackeval.metrics.CLEAR({"THRESHOLD": eval_iou_threshold, "PRINT_CONFIG": False})
-    identity_metric = trackeval.metrics.Identity({"THRESHOLD": eval_iou_threshold, "PRINT_CONFIG": False})
+    identity_metric = trackeval.metrics.Identity(
+        {"THRESHOLD": eval_iou_threshold, "PRINT_CONFIG": False}
+    )
+    hota_metric = trackeval.metrics.HOTA({"THRESHOLD": eval_iou_threshold, "PRINT_CONFIG": False})
 
     per_sequence: dict[str, dict] = {}
+    class_names = classes_to_eval or TRACKEVAL_CLASS_NAMES
     for sequence, sequence_results in tracker_results.items():
         if sequence == "COMBINED_SEQ":
             continue
-        clear_by_class = {class_name: sequence_results[class_name]["CLEAR"] for class_name in TRACKEVAL_CLASS_NAMES}
-        identity_by_class = {class_name: sequence_results[class_name]["Identity"] for class_name in TRACKEVAL_CLASS_NAMES}
+        hota_by_class = {
+            class_name: sequence_results[class_name]["HOTA"] for class_name in class_names
+        }
+        clear_by_class = {
+            class_name: sequence_results[class_name]["CLEAR"] for class_name in class_names
+        }
+        identity_by_class = {
+            class_name: sequence_results[class_name]["Identity"] for class_name in class_names
+        }
+        combined_hota = hota_metric.combine_classes_det_averaged(hota_by_class)
         combined_clear = clear_metric.combine_classes_det_averaged(clear_by_class)
         combined_identity = identity_metric.combine_classes_det_averaged(identity_by_class)
         per_sequence[sequence] = {
             "metrics": {
+                "HOTA": float(np.mean(combined_hota["HOTA"])),
                 "MOTA": float(combined_clear["MOTA"]),
                 "IDF1": float(combined_identity["IDF1"]),
                 "IDS": int(combined_clear["IDSW"]),
+                "FP": int(combined_clear["CLR_FP"]),
+                "FN": int(combined_clear["CLR_FN"]),
             },
             "by_class": {
                 class_name: {
+                    "HOTA": float(np.mean(sequence_results[class_name]["HOTA"]["HOTA"])),
                     "MOTA": float(sequence_results[class_name]["CLEAR"]["MOTA"]),
                     "IDF1": float(sequence_results[class_name]["Identity"]["IDF1"]),
                     "IDS": int(sequence_results[class_name]["CLEAR"]["IDSW"]),
+                    "FP": int(sequence_results[class_name]["CLEAR"]["CLR_FP"]),
+                    "FN": int(sequence_results[class_name]["CLEAR"]["CLR_FN"]),
                 }
                 for class_name in TRACKEVAL_CLASS_NAMES
+                if class_name in class_names
             },
         }
 
     combined = tracker_results["COMBINED_SEQ"]["cls_comb_det_av"]
     aggregate = {
+        "HOTA": float(np.mean(combined["HOTA"]["HOTA"])),
         "MOTA": float(combined["CLEAR"]["MOTA"]),
         "IDF1": float(combined["Identity"]["IDF1"]),
         "IDS": int(combined["CLEAR"]["IDSW"]),
+        "FP": int(combined["CLEAR"]["CLR_FP"]),
+        "FN": int(combined["CLEAR"]["CLR_FN"]),
     }
 
     return {
@@ -512,12 +585,32 @@ def write_summary_csv(summary: dict, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wt", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["sequence", "MOTA", "IDF1", "IDS"])
+        writer.writerow(["sequence", "HOTA", "MOTA", "IDF1", "IDS", "FP", "FN"])
         for sequence, sequence_summary in summary["per_sequence"].items():
             metrics = sequence_summary["metrics"]
-            writer.writerow([sequence, f"{metrics['MOTA']:.6f}", f"{metrics['IDF1']:.6f}", metrics["IDS"]])
+            writer.writerow(
+                [
+                    sequence,
+                    f"{metrics['HOTA']:.6f}",
+                    f"{metrics['MOTA']:.6f}",
+                    f"{metrics['IDF1']:.6f}",
+                    metrics["IDS"],
+                    metrics["FP"],
+                    metrics["FN"],
+                ]
+            )
         aggregate = summary["aggregate"]
-        writer.writerow(["COMBINED", f"{aggregate['MOTA']:.6f}", f"{aggregate['IDF1']:.6f}", aggregate["IDS"]])
+        writer.writerow(
+            [
+                "COMBINED",
+                f"{aggregate['HOTA']:.6f}",
+                f"{aggregate['MOTA']:.6f}",
+                f"{aggregate['IDF1']:.6f}",
+                aggregate["IDS"],
+                aggregate["FP"],
+                aggregate["FN"],
+            ]
+        )
 
 
 def write_summary_json(summary: dict, output_path: Path) -> None:
