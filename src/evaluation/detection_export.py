@@ -11,7 +11,6 @@ import numpy as np
 
 from src.data.dataset import _find_dataset, _import_h5, _timestamp_window_indices
 
-
 CLASS_NAMES = {
     0: "car",
     1: "pedestrian",
@@ -71,7 +70,9 @@ def load_annotations(path: Path) -> list[Annotation]:
 
 
 def load_image_timestamps(path: Path) -> list[int]:
-    return [int(line.strip()) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [
+        int(line.strip()) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
 
 
 def load_event_file(events_h5: Path):
@@ -89,7 +90,9 @@ def load_event_file(events_h5: Path):
     return handle, x, y, p, t, ms_to_idx, t_offset, np_h5
 
 
-def read_events(x, y, p, t, ms_to_idx, t_offset: int, timestamp_us: int, window_us: int) -> np.ndarray:
+def read_events(
+    x, y, p, t, ms_to_idx, t_offset: int, timestamp_us: int, window_us: int
+) -> np.ndarray:
     start_us = timestamp_us - window_us
     start_idx, end_idx = _timestamp_window_indices(ms_to_idx, t, t_offset, start_us, timestamp_us)
 
