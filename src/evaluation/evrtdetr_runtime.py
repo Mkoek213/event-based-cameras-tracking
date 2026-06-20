@@ -13,10 +13,11 @@ import torch.nn.functional as F
 
 from src.data.dataset import EVENT_HEIGHT, EVENT_WIDTH, _timestamp_window_indices
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EVRT_DETR_ROOT = REPO_ROOT / "external" / "evrt-detr"
-DEFAULT_PUBLIC_MODEL_ROOT = REPO_ROOT / "external" / "models" / "evrt-detr" / "gen4_frame_rtdetr_presnet50"
+DEFAULT_PUBLIC_MODEL_ROOT = (
+    REPO_ROOT / "external" / "models" / "evrt-detr" / "gen4_frame_rtdetr_presnet50"
+)
 
 
 @dataclass(frozen=True)
@@ -52,10 +53,12 @@ def import_evrtdetr_parts():
         sys.path.insert(0, str(EVRT_DETR_ROOT))
 
     try:
-        from evlearn.nn.backbone.presnet_rtdetr import PResNetRTDETR
         from evlearn.bundled.rtdetr_pytorch.zoo.rtdetr.hybrid_encoder import HybridEncoder
         from evlearn.bundled.rtdetr_pytorch.zoo.rtdetr.rtdetr_decoder import RTDETRTransformer
-        from evlearn.bundled.rtdetr_pytorch.zoo.rtdetr.rtdetr_postprocessor import RTDETRPostProcessor
+        from evlearn.bundled.rtdetr_pytorch.zoo.rtdetr.rtdetr_postprocessor import (
+            RTDETRPostProcessor,
+        )
+        from evlearn.nn.backbone.presnet_rtdetr import PResNetRTDETR
     except ImportError as exc:  # pragma: no cover - runtime dependency check
         raise SystemExit(
             "Failed to import EvRT-DETR runtime pieces. Install the external runtime "
@@ -72,8 +75,9 @@ def resolve_model_dir(root: Path) -> Path:
 
     candidates = sorted(path.parent for path in root.rglob("config.json"))
     valid = [
-        path for path in candidates
-            if any(path.glob("net_*_decoder.pth")) or (path / "net_decoder.pth").exists()
+        path
+        for path in candidates
+        if any(path.glob("net_*_decoder.pth")) or (path / "net_decoder.pth").exists()
     ]
 
     if len(valid) == 1:
@@ -111,8 +115,15 @@ def load_state_dict(module: torch.nn.Module, path: Path, device: torch.device) -
         module.load_state_dict(stripped)
 
 
-def load_evrtdetr_model(model_dir: Path, device_name: str, forced_n_bins: int = 0) -> LoadedEvRTDETR:
-    PResNetRTDETR, HybridEncoder, RTDETRTransformer, RTDETRPostProcessor = import_evrtdetr_parts()
+def load_evrtdetr_model(
+    model_dir: Path, device_name: str, forced_n_bins: int = 0
+) -> LoadedEvRTDETR:
+    (
+        presnet_rtdetr_cls,
+        hybrid_encoder_cls,
+        rtdetr_transformer_cls,
+        rtdetr_postprocessor_cls,
+    ) = import_evrtdetr_parts()
 
     model_dir = resolve_model_dir(model_dir)
     config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
@@ -134,21 +145,29 @@ def load_evrtdetr_model(model_dir: Path, device_name: str, forced_n_bins: int = 
         n_bins = forced_n_bins
 
     if device_name.startswith("cuda") and not torch.cuda.is_available():
-        raise SystemExit("CUDA was requested but torch.cuda.is_available() is False in the current environment.")
+        raise SystemExit(
+            "CUDA was requested but torch.cuda.is_available() is False in the current environment."
+        )
 
     device = torch.device(device_name)
-    backbone = PResNetRTDETR(
+    backbone = presnet_rtdetr_cls(
         input_shape=frame_shape,
         **strip_name(config["nets"]["backbone"]["model"]),
     ).to(device)
-    encoder = HybridEncoder(**strip_name(config["nets"]["encoder"]["model"])).to(device)
-    decoder = RTDETRTransformer(**strip_name(config["nets"]["decoder"]["model"])).to(device)
-    postprocessor = RTDETRPostProcessor(**config["model"]["rtdetr_postproc_kwargs"]).to(device)
+    encoder = hybrid_encoder_cls(**strip_name(config["nets"]["encoder"]["model"])).to(device)
+    decoder = rtdetr_transformer_cls(**strip_name(config["nets"]["decoder"]["model"])).to(device)
+    postprocessor = rtdetr_postprocessor_cls(**config["model"]["rtdetr_postproc_kwargs"]).to(device)
     postprocessor.deploy()
 
-    backbone_path, backbone_ema = choose_weight_path(model_dir, "net_ema_backbone.pth", "net_backbone.pth")
-    encoder_path, encoder_ema = choose_weight_path(model_dir, "net_ema_encoder.pth", "net_encoder.pth")
-    decoder_path, decoder_ema = choose_weight_path(model_dir, "net_ema_decoder.pth", "net_decoder.pth")
+    backbone_path, backbone_ema = choose_weight_path(
+        model_dir, "net_ema_backbone.pth", "net_backbone.pth"
+    )
+    encoder_path, encoder_ema = choose_weight_path(
+        model_dir, "net_ema_encoder.pth", "net_encoder.pth"
+    )
+    decoder_path, decoder_ema = choose_weight_path(
+        model_dir, "net_ema_decoder.pth", "net_decoder.pth"
+    )
 
     load_state_dict(backbone, backbone_path, device)
     load_state_dict(encoder, encoder_path, device)
@@ -184,7 +203,7 @@ def build_stacked_histogram(
     timestamp_us: int,
     window_us: int,
     n_bins: int,
-    np_mod = np,
+    np_mod=np,
 ) -> np.ndarray:
     start_us = timestamp_us - window_us
     start_idx, end_idx = _timestamp_window_indices(ms_to_idx, t, t_offset, start_us, timestamp_us)
@@ -225,7 +244,9 @@ def build_stacked_histogram(
     return hist
 
 
-def letterbox_frame(hist: np.ndarray, target_hw: tuple[int, int]) -> tuple[torch.Tensor, ResizeMeta]:
+def letterbox_frame(
+    hist: np.ndarray, target_hw: tuple[int, int]
+) -> tuple[torch.Tensor, ResizeMeta]:
     _, _, source_h, source_w = hist.shape
     target_h, target_w = target_hw
     scale = min(target_w / source_w, target_h / source_h)
