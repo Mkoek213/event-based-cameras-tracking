@@ -141,7 +141,9 @@ class SimpleIoUTracker:
                 )
             self._next_id += 1
 
-        self._tracks = [track for track in self._tracks if track.missed_frames <= self.max_missed_frames]
+        self._tracks = [
+            track for track in self._tracks if track.missed_frames <= self.max_missed_frames
+        ]
         outputs.sort(key=lambda item: item.track_id)
         return outputs
 
@@ -151,7 +153,9 @@ def load_detections_by_frame(path: Path) -> list[tuple[int, int, list[DetectionO
     grouped: dict[int, list[DetectionObservation]] = {
         int(frame["frame_index"]): [] for frame in payload.get("frames", [])
     }
-    timestamps = {int(frame["frame_index"]): int(frame["timestamp"]) for frame in payload.get("frames", [])}
+    timestamps = {
+        int(frame["frame_index"]): int(frame["timestamp"]) for frame in payload.get("frames", [])
+    }
     for row in payload.get("detections", []):
         detection = DetectionObservation(
             frame_index=int(row["frame_index"]),
@@ -192,7 +196,8 @@ def track_detections(
         tracked_records.extend(tracker.update(detections))
 
     output_path.write_text(
-        "\n".join(record.to_trackeval_line() for record in tracked_records) + ("\n" if tracked_records else ""),
+        "\n".join(record.to_trackeval_line() for record in tracked_records)
+        + ("\n" if tracked_records else ""),
         encoding="utf-8",
     )
 
