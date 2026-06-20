@@ -159,10 +159,14 @@ def main() -> int:
     for sequence, sequence_summary in summary["per_sequence"].items():
         metrics = sequence_summary["metrics"]
         print(
-            f"  {sequence}: MOTA={metrics['MOTA']:.4f} IDF1={metrics['IDF1']:.4f} IDS={metrics['IDS']}"
+            f"  {sequence}: HOTA={metrics['HOTA']:.4f} MOTA={metrics['MOTA']:.4f} "
+            f"IDF1={metrics['IDF1']:.4f} IDS={metrics['IDS']} FP={metrics['FP']} FN={metrics['FN']}"
         )
     aggregate = summary["aggregate"]
-    print(f"  COMBINED: MOTA={aggregate['MOTA']:.4f} IDF1={aggregate['IDF1']:.4f} IDS={aggregate['IDS']}")
+    print(
+        f"  COMBINED: HOTA={aggregate['HOTA']:.4f} MOTA={aggregate['MOTA']:.4f} "
+        f"IDF1={aggregate['IDF1']:.4f} IDS={aggregate['IDS']} FP={aggregate['FP']} FN={aggregate['FN']}"
+    )
     print(f"Saved summary JSON to {summary_json}")
     print(f"Saved summary CSV to {summary_csv}")
     return 0
