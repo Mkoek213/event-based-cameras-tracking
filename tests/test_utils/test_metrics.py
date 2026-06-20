@@ -1,7 +1,6 @@
 """Unit tests for utility functions."""
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest

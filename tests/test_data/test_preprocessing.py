@@ -33,6 +33,25 @@ class TestEventPreprocessor:
         assert out.shape == (2, self.H, self.W)
         assert out.sum() == 0
 
+    def test_event_frame_accumulates_events_by_polarity(self):
+        proc = EventPreprocessor(self.H, self.W, representation="event_frame")
+        dtype = np.dtype([("x", np.uint16), ("y", np.uint16), ("t", np.int64), ("p", np.bool_)])
+        events = np.array(
+            [
+                (5, 6, 10, False),
+                (5, 6, 11, False),
+                (7, 8, 12, True),
+                (999, 8, 13, True),
+            ],
+            dtype=dtype,
+        )
+
+        out = proc(events)
+
+        assert out[0, 6, 5] == 2
+        assert out[1, 8, 7] == 1
+        assert out.sum() == 3
+
     def test_time_surface_shape(self):
         proc = EventPreprocessor(self.H, self.W, representation="time_surface")
         events = _make_events(height=self.H, width=self.W)
@@ -45,11 +64,16 @@ class TestEventPreprocessor:
         proc = EventPreprocessor(self.H, self.W, representation="voxel_grid", num_bins=num_bins)
         events = _make_events(height=self.H, width=self.W)
         out = proc(events)
-        assert out.shape == (num_bins, self.H, self.W)
+        assert out.shape == (2 * num_bins, self.H, self.W)
+        assert out.sum() == len(events)
 
     def test_invalid_representation(self):
         with pytest.raises(ValueError, match="Unknown representation"):
             EventPreprocessor(self.H, self.W, representation="bad_rep")
+
+    def test_invalid_num_bins(self):
+        with pytest.raises(ValueError, match="num_bins"):
+            EventPreprocessor(self.H, self.W, representation="voxel_grid", num_bins=0)
 
 
 class TestEventDataset:
