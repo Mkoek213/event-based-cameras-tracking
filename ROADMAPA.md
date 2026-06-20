@@ -117,15 +117,16 @@ Pełny pipeline jest już domknięty:
 
 `dataset -> reprezentacja -> detektor -> tracker -> eksport -> TrackEval`
 
-Główne skrypty:
+Główne moduły:
 
-- `scripts/train_simple_detector_dsec_mot.py`
-- `scripts/evaluate_simple_detector_dsec_mot_trackeval.py`
-- `scripts/run_simple_detector_eros_benchmark.py`
-- `scripts/run_simple_detector_representation_sweep.py`
-- `scripts/run_simple_detector_car_only_benchmark.py`
-- `scripts/evaluate_detection_metrics.py`
-- `scripts/summarise_car_only_results.py`
+- `src.training.simple_detector` - pojedynczy trening `SimpleDenseDetector`
+- `src.evaluation.simple_detector_trackeval_cli` - eksport detekcji, tracking i TrackEval
+- `src.evaluation.detection_metrics_cli` - metryki detekcyjne `AP50`, precision, recall, F1
+- `src.data.eros_precompute` - cache reprezentacji EROS
+- `src.experiments.simple_detector_representation_sweep` - sweep EF/VG/EF+VG
+- `src.experiments.simple_detector_eros_benchmark` - benchmark EROS i fuzji z EROS
+- `src.experiments.simple_detector_car_only_benchmark` - car-only trening i ewaluacja
+- `src.experiments.summarise_car_only_results` - wybór progów i tabela car-only
 
 ### 4.3. Ograniczenia projektowe
 

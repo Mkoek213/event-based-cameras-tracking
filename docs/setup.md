@@ -23,32 +23,84 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Running Training
+For the current DSEC-MOT workflow, `requirements.txt` is enough. Optional
+packages for other event formats such as `.dat` / `.raw` can be installed
+later if they become necessary.
+
+## Validating DSEC-MOT
 
 ```bash
-python scripts/train.py --config-name base_config
+.venv/bin/python scripts/validate_dsec_mot.py
 ```
 
-Override any config value on the command line:
+## Running Public EvRT-DETR Inference
 
 ```bash
-python scripts/train.py training.epochs=200 data.batch_size=32
+.venv/bin/python scripts/run_evrtdetr_dsec_mot.py \
+  --split test \
+  --sequence interlaken_00_d \
+  --max-frames 100
 ```
 
-## Running Evaluation
+## Converting DSEC-MOT For EvRT-DETR Fine-Tuning
 
 ```bash
-python scripts/evaluate.py --config-name base_config
+.venv/bin/python scripts/convert_dsec_mot_to_evrtdetr_npz.py
 ```
 
-## Running Inference
+## Running EvRT-DETR Export + MOT Evaluation
 
 ```bash
-python scripts/inference.py --input data/raw/sample.dat --output results/
+.venv/bin/python scripts/export_evrtdetr_dsec_mot.py \
+  --split test \
+  --sequence interlaken_00_d
+
+.venv/bin/python scripts/evaluate_evrtdetr_dsec_mot_trackeval.py \
+  --split test
+```
+
+## Running The Active Representation Benchmark
+
+The active thesis benchmark is module-first and should be run with
+`python -m src...`, not through wrappers in `scripts/`.
+
+Main representation sweep:
+
+```bash
+.venv/bin/python -m src.experiments.simple_detector_representation_sweep \
+  --num-bins 5 \
+  --time-window-us 50000 \
+  --variants event_frame voxel_grid event_frame_voxel_grid_two_branch \
+  --epochs 30 \
+  --batch-size 16 \
+  --num-workers 4 \
+  --device cuda
+```
+
+EROS cache and EROS benchmark:
+
+```bash
+.venv/bin/python -m src.data.eros_precompute
+
+.venv/bin/python -m src.experiments.simple_detector_eros_benchmark \
+  --epochs 30 \
+  --batch-size 16 \
+  --num-workers 4 \
+  --device cuda
+```
+
+Car-only benchmark:
+
+```bash
+.venv/bin/python -m src.experiments.simple_detector_car_only_benchmark \
+  --epochs 30 \
+  --batch-size 16 \
+  --num-workers 4 \
+  --device cuda
 ```
 
 ## Running Tests
 
 ```bash
-pytest
+.venv/bin/python -m pytest
 ```
