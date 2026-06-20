@@ -1,14 +1,48 @@
 # Roadmapa benchmarku MOT na DSEC-MOT
 
+## 0. Stan aktualny na 2026-06-20
+
+Pierwszy kontrolowany benchmark reprezentacji na `DSEC-MOT` jest już wykonany i opisany roboczo w rozdziale pracy. Repo zawiera działający pipeline:
+
+`DSEC-MOT -> reprezentacja eventów -> SimpleDenseDetector -> NMS -> IoU tracker -> TrackEval -> tabele wyników`
+
+Zaimplementowane i przetestowane warianty:
+
+1. `EF` - event frame.
+2. `VG` - voxel grid.
+3. `EF+VG single` - wczesna fuzja przez sklejenie kanałów.
+4. `EF+VG two_branch` - osobne gałęzie wejściowe i fuzja cech.
+5. `EROS` oraz fuzje `EF+EROS`, `VG+EROS`, `EF+VG+EROS`.
+6. `EF+VG gated_two_branch` - adaptacyjne bramkowanie cech EF/VG.
+7. Car-only analiza z istniejących wyników oraz osobny pipeline do car-only treningu.
+
+Najważniejszy dotychczasowy wynik:
+
+- w podstawowym benchmarku wieloklasowym najlepsze `HOTA` i `IDF1` daje `EF+VG two_branch`, `bins=5`, `window=50 ms`;
+- `VG` bywa lepszy pod `MOTA`, ale gorzej utrzymuje tożsamość niż `EF+VG two_branch`;
+- `EF+VG single` jest niestabilny i nie daje poprawy na teście;
+- EROS jest wartościowym punktem odniesienia, ale nie poprawia głównego wariantu w pełnym benchmarku;
+- `gated_two_branch` poprawia część metryk detekcyjnych i czasem `MOTA`, ale pogarsza `HOTA` oraz `IDF1`;
+- analiza car-only nie zmienia głównego wniosku: `EF+VG two_branch` pozostaje najlepszym wariantem pod `HOTA/IDF1` dla głównych konfiguracji.
+
+Aktywny etap:
+
+1. uruchomić pełny car-only trening dla dotychczasowych wariantów,
+2. porównać wyniki car-only training z dotychczasową car-only ewaluacją modeli wieloklasowych,
+3. zdecydować, czy rozszerzać trening o drugi dataset, np. `TUMTraf EMOT` albo `MEVDT`,
+4. zaktualizować rozdział pracy o EROS, gated fusion, detekcyjne metryki i car-only analizę.
+
+Uwaga: dalsze sekcje dokumentu zawierają także historyczny plan etapów. Nie wszystkie punkty są już aktualnymi zadaniami do wykonania.
+
 ## 1. Cel dokumentu
 
 Ten dokument roboczy opisuje plan wykonania benchmarku metod `MOT` na `DSEC-MOT`, ze szczególnym naciskiem na porównanie reprezentacji danych eventowych.
 
-Główne pytanie na ten etap pracy brzmi:
+Główne pytanie pierwszego etapu pracy brzmiało:
 
 `Jak wypadają metody MOT na DSEC-MOT w zależności od sposobu wykorzystania eventów: same event frames, same voxele oraz wariant mieszany event frames + voxele?`
 
-Na tym etapie fokus pozostaje na benchmarku i analizie porównawczej. Dokument nie obejmuje jeszcze projektowania nowej metody jako głównego celu.
+Obecnie fokus przesunął się z uruchomienia benchmarku na analizę ablacyjną, car-only eksperymenty oraz próby prostych usprawnień fuzji reprezentacji.
 
 ## 2. Kolejność pracy
 
@@ -29,23 +63,25 @@ Celem jest zbudowanie działającego, uczciwego i powtarzalnego benchmarku metod
 
 ### 3.2. Główne warianty
 
-Na tym etapie porównanie obejmuje trzy główne warianty:
+Pierwotnie porównanie obejmowało trzy główne warianty:
 
 1. `event-frame only`
 2. `voxel-only`
-3. `event frames do detekcji + voxele do śledzenia`
+3. `event frames + voxele`
 
-Są to warianty wynikające bezpośrednio z przeanalizowanej literatury i z obecnego kierunku pracy.
+W implementacji wariant `EF+VG` został zrealizowany jako wejście do jednego modelu detekcji w trybach `single`, `two_branch` i `gated_two_branch`, a nie jako osobny detektor EF i osobny tracker VG.
 
 ### 3.3. Zakres dodatkowy
 
-Poza samymi metrykami jakości śledzenia benchmark powinien również obejmować:
+Poza samymi metrykami jakości śledzenia benchmark obejmuje lub powinien obejmować:
 
 - czas inferencji
 - `FPS`
 - latencję end-to-end
 - zużycie zasobów w warunkach developerskich
 - uproszczony test uruchomienia na `Jetsonie`
+- metryki detekcyjne `AP50`, precision, recall i F1 dla eksportowanych detekcji
+- analizę `car-only`, ponieważ klasa `car` dominuje w `DSEC-MOT`
 
 ### 3.4. Poza zakresem tego etapu
 
@@ -77,9 +113,19 @@ W repo znajdują się już kilka ważnych elementów:
 - adapter `TrackEval` dla `DSEC-MOT` jest już zaczęty
 - istnieje prosty baseline śledzenia typu `IoU tracking-by-detection`
 
-Nie ma jeszcze jednak pełnego, domkniętego pipeline'u:
+Pełny pipeline jest już domknięty:
 
 `dataset -> reprezentacja -> detektor -> tracker -> eksport -> TrackEval`
+
+Główne skrypty:
+
+- `scripts/train_simple_detector_dsec_mot.py`
+- `scripts/evaluate_simple_detector_dsec_mot_trackeval.py`
+- `scripts/run_simple_detector_eros_benchmark.py`
+- `scripts/run_simple_detector_representation_sweep.py`
+- `scripts/run_simple_detector_car_only_benchmark.py`
+- `scripts/evaluate_detection_metrics.py`
+- `scripts/summarise_car_only_results.py`
 
 ### 4.3. Ograniczenia projektowe
 
@@ -91,14 +137,28 @@ Na obecnym etapie obowiązują następujące ograniczenia:
 - priorytetem pozostają `uczciwość porównania` oraz `jakość wyników`
 - jeśli pełna reprodukcja paperu nie będzie możliwa, dopuszczalna jest implementacja inspirowana artykułem, pod warunkiem jasnego opisania uproszczeń
 
+### 4.4. Decyzja implementacyjna: kontrolowany własny detektor
+
+Od 2026-05-21 główny benchmark porównania reprezentacji eventów ma być oparty na małym, własnym detektorze trenowanym lokalnie, a nie na gotowym checkpoincie EvRT-DETR jako modelu porównawczym.
+
+Uzasadnienie:
+
+- celem pracy jest porównanie reprezentacji wejścia, a nie znalezienie najlepszego gotowego detektora
+- gotowy EvRT-DETR pozostaje użyteczny jako smoke test infrastruktury, ale jego checkpoint oczekuje wejścia `20 x 384 x 640`, czyli nie jest czystym wariantem `event-frame only`
+- własny lekki detektor pozwala utrzymać tę samą architekturę, ten sam loss, ten sam tracker i ten sam protokół ewaluacji dla `EF`, `VG` i `EF+VG`
+- wynik nie musi być SOTA; ważniejsza jest kontrola eksperymentu i rzetelna analiza wpływu reprezentacji
+
+Historycznie pierwszy pełny trening rozpoczął się od `voxel_grid`, ponieważ było to najtrudniejsze wejście do ustabilizowania. Obecnie ta sama architektura została już uruchomiona dla `EF`, `VG`, `EF+VG`, `EROS`, wariantów fuzji oraz pipeline'u `car-only`.
+
 ## 5. Hipotezy robocze
 
-Na obecnym etapie przyjęte są następujące hipotezy:
+Na obecnym etapie hipotezy zostały częściowo zweryfikowane:
 
 1. `voxel-only` powinno lepiej zachowywać informację czasową niż `event-frame only`, więc może poprawić `IDF1` i ograniczyć `IDs`
 2. `event-frame only` powinno być najłatwiejsze do uruchomienia i najbliższe klasycznemu `tracking-by-detection`
-3. wariant mieszany `event frames + voxele` powinien dawać najlepszy kompromis między jakością detekcji a stabilnością śledzenia
-4. sama lepsza reprezentacja eventów nie musi automatycznie poprawiać wszystkich metryk, bo w `MOT` problemem pozostaje również asocjacja
+3. wariant mieszany `event frames + voxele` w trybie `two_branch` daje najlepszy kompromis pod `HOTA/IDF1`
+4. sama lepsza detekcja nie musi automatycznie poprawiać `HOTA`, bo w `MOT` problemem pozostaje również asocjacja
+5. gated fusion może poprawić detekcyjne precision/recall lub `MOTA`, ale niekoniecznie poprawia spójność tożsamości
 
 ## 6. Macierz benchmarku
 
@@ -108,13 +168,25 @@ Na obecnym etapie przyjęte są następujące hipotezy:
 | --- | --- | --- | --- | --- |
 | `EF` | `event-frame only` | detekcja i wejście do śledzenia | brak | klasyczny event-based tracking-by-detection |
 | `VG` | `voxel-only` | brak | główna reprezentacja czasoprzestrzenna | nurt `voxel-grid / EST / spiking / temporal` |
-| `EF+VG` | `event frames + voxele` | detekcja | podtrzymanie toru / matching / tracking | kierunek inspirowany `SpikeMOT` |
+| `EF+VG single` | `event frames + voxele` | część wejścia detektora | część wejścia detektora | wczesna fuzja kanałów |
+| `EF+VG two_branch` | `event frames + voxele` | osobna gałąź wejściowa | osobna gałąź wejściowa | fuzja cech przed wspólnym backbone |
+| `EF+VG gated` | `event frames + voxele` | gałąź ważona bramką | gałąź ważona bramką | adaptacyjna fuzja cech |
+
+W kontrolowanej implementacji główne warianty przechodzą przez tę samą lekką architekturę detekcyjną:
+
+- `EF`: wejście `2 x H x W`
+- `VG`: wejście `2B x H x W`, startowo `B=5`
+- `EF+VG`: wejście `(2 + 2B) x H x W`
+
+Taki układ jest uproszczeniem względem SpikeMOT, ale daje czystsze porównanie reprezentacji jako wejść do modelu detekcji. Wariant bliższy SpikeMOT, czyli `event frames` do detekcji i `voxele` do motion update / matchingu, pozostaje możliwym osobnym etapem.
 
 ### 6.2. Warianty pomocnicze
 
 Na później pozostają również warianty pomocnicze:
 
-- `time_surface`
+- `EROS`
+- `gated_two_branch`
+- `car-only training`
 - `frame-event fusion`
 - eksperymenty z długością okna eventowego
 - eksperymenty z liczbą binów voxelowych
@@ -268,6 +340,7 @@ Co implementować:
 - prosty baseline `tracking-by-detection`
 - integrację prostego trackera z eksportem wyników
 - jeden pełny przebieg benchmarku kończący się raportem metryk
+- lekki własny detektor dense CNN jako kontrolowany model do późniejszego porównania reprezentacji
 
 Co wpisywać do pracy:
 
@@ -283,6 +356,7 @@ Co powinno powstać:
 Kryterium zamknięcia:
 
 - można wykonać benchmark dla jednej sekwencji i dla całego podzbioru testowego
+- przynajmniej jeden wariant własnego detektora zapisuje checkpoint, eksportuje detekcje i przechodzi przez `TrackEval`
 
 ### Etap 3. Wariant `EF`
 
@@ -328,6 +402,13 @@ Zakres prac:
 - ustalić postać `voxel grid` i liczbę binów
 - wybrać, czy voxele służą głównie do detekcji, czy do samego śledzenia
 - wdrożyć uproszczony, ale uczciwy voxel baseline
+
+Aktualna decyzja robocza:
+
+- pierwszy wariant `VG` to `voxel_grid` jako wejście małego dense detektora
+- startowa konfiguracja: `num_bins=5`, czyli `10` kanałów polarity-aware
+- jeśli trening pokazuje spadek lossu i sensowne detekcje, ten sam detektor zostanie wykorzystany dla `EF` i `EF+VG`
+- wariant bardziej zbliżony do SpikeMOT, gdzie voxele podtrzymują tracki między detekcjami, zostaje na później
 - zestawić go na tej samej ewaluacji co `EF`
 
 Co implementować:
@@ -589,13 +670,13 @@ Benchmark można uznać za wykonany, jeśli:
 ### Status ogólny
 
 - status dokumentu: `draft`
-- etap aktywny: `Etap 0 / Etap 1`
+- etap aktywny: `car-only training + analiza ablacyjna`
 - główny benchmark: `DSEC-MOT`
-- główne warianty: `EF`, `VG`, `EF+VG`
+- główne warianty: `EF`, `VG`, `EF+VG`, `EROS`, `gated_two_branch`, `car-only`
 
 ### Miejsce na bieżące uzupełnianie
 
-- ostatnio zakończony etap:
-- aktualny blocker:
-- następny deliverable:
-- decyzje projektowe do podjęcia:
+- ostatnio zakończony etap: benchmark EF/VG/EROS/gated oraz car-only ewaluacja istniejących wyników
+- aktualny blocker: brak; następny długi krok to car-only trening
+- następny deliverable: tabela car-only training + aktualizacja rozdziału pracy
+- decyzje projektowe do podjęcia: czy rozszerzać trening o `TUMTraf EMOT` albo `MEVDT`
