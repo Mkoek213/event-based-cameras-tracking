@@ -250,3 +250,12 @@ external/evrt-detr/wandb/
 # Local notes / scratch
 tmp/
 scratch/
+
+# data cache
+data/cache/
+
+#runs
+runs/
+
+#article artifacts
+_INZ27__MK__DVS_Tracking
