@@ -18,6 +18,13 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing source PDF files.",
     )
     parser.add_argument(
+        "--input-file",
+        type=Path,
+        action="append",
+        default=[],
+        help="Specific PDF file to convert. May be passed multiple times.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("articles/markdown_articles"),
@@ -70,15 +77,25 @@ def main() -> int:
     args = parse_args()
     pdftotext_bin = ensure_pdftotext()
 
-    input_dir = args.input_dir
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pdf_paths = sorted(path for path in input_dir.glob("*.pdf") if path.is_file())
-    if not pdf_paths:
-        raise SystemExit(f"No PDF files found in {input_dir}")
+    if args.input_file:
+        pdf_paths = args.input_file
+    else:
+        pdf_paths = sorted(path for path in args.input_dir.glob("*.pdf") if path.is_file())
 
-    print(f"Input directory: {input_dir}")
+    invalid_paths = [path for path in pdf_paths if not path.is_file() or path.suffix.lower() != ".pdf"]
+    if invalid_paths:
+        raise SystemExit(f"Invalid PDF file: {invalid_paths[0]}")
+
+    if not pdf_paths:
+        raise SystemExit(f"No PDF files found in {args.input_dir}")
+
+    if args.input_file:
+        print(f"Input files: {len(pdf_paths)}")
+    else:
+        print(f"Input directory: {args.input_dir}")
     print(f"Output directory: {output_dir}")
 
     for pdf_path in pdf_paths:
