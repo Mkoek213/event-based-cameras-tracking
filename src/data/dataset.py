@@ -95,6 +95,7 @@ class EventDataset:
         class_offset: int = 1,
         positive_radius: int = 1,
         sequences: Optional[Sequence[str]] = None,
+        class_ids: Optional[Sequence[int]] = None,
     ) -> None:
         self.root = Path(root)
         self.split = split
@@ -106,6 +107,7 @@ class EventDataset:
         self.class_offset = int(class_offset)
         self.positive_radius = max(int(positive_radius), 0)
         self.sequence_filter = set(sequences) if sequences is not None else None
+        self.class_id_filter = set(int(class_id) for class_id in class_ids) if class_ids else None
         self._samples = self._load_manifest()
         self._event_cache: dict[str, tuple] = {}
         self._h5py = None
@@ -129,6 +131,12 @@ class EventDataset:
             timestamps = self._load_timestamps(seq_dir / f"{sequence}_image_timestamps.txt")
             for frame_index, timestamp in enumerate(timestamps):
                 annotations = grouped.get(timestamp, [])
+                if self.class_id_filter is not None:
+                    annotations = [
+                        annotation
+                        for annotation in annotations
+                        if annotation.class_id in self.class_id_filter
+                    ]
                 if annotations or self.include_unannotated:
                     samples.append(
                         {
@@ -195,7 +203,9 @@ class EventDataset:
     def _read_events(self, sequence: str, seq_dir: Path, timestamp_us: int) -> np.ndarray:
         _, x, y, p, t, ms_to_idx, t_offset = self._get_event_handle(sequence, seq_dir)
         start_us = timestamp_us - self.time_window_us
-        start_idx, end_idx = _timestamp_window_indices(ms_to_idx, t, t_offset, start_us, timestamp_us)
+        start_idx, end_idx = _timestamp_window_indices(
+            ms_to_idx, t, t_offset, start_us, timestamp_us
+        )
 
         dtype = np.dtype([("x", np.uint16), ("y", np.uint16), ("t", np.int64), ("p", np.bool_)])
         if end_idx <= start_idx:
@@ -212,7 +222,9 @@ class EventDataset:
         events["p"] = ps
         return events
 
-    def _encode_targets(self, annotations: list[Annotation]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _encode_targets(
+        self, annotations: list[Annotation]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         feat_h = EVENT_HEIGHT // self.feature_stride
         feat_w = EVENT_WIDTH // self.feature_stride
         cls_targets = np.zeros((feat_h, feat_w), dtype=np.int64)
