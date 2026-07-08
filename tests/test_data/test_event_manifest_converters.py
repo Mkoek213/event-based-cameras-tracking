@@ -6,6 +6,7 @@ from src.data.converters.event_manifest import (
     event_array,
     group_boxes_by_timestamp,
     load_structured_boxes,
+    read_h5_event_file,
     save_dense_representations,
     select_event_window,
     split_rows,
@@ -72,3 +73,21 @@ def test_split_rows_is_deterministic_and_non_empty():
     assert val_a == val_b
     assert len(train_a) == 8
     assert len(val_a) == 2
+
+
+def test_h5_event_reader_applies_t_offset(tmp_path):
+    import h5py
+
+    path = tmp_path / "events.h5"
+    with h5py.File(path, "w") as handle:
+        group = handle.create_group("events")
+        group.create_dataset("x", data=np.array([1, 2], dtype=np.uint16))
+        group.create_dataset("y", data=np.array([3, 4], dtype=np.uint16))
+        group.create_dataset("p", data=np.array([0, 1], dtype=np.uint8))
+        group.create_dataset("t", data=np.array([10, 20], dtype=np.int64))
+        group.create_dataset("t_offset", data=np.array(1000, dtype=np.int64))
+
+    events = read_h5_event_file(path)
+
+    assert events["t"].tolist() == [1010, 1020]
+    assert events["x"].tolist() == [1, 2]

@@ -294,7 +294,12 @@ def iter_sampled_timestamps(
 
 
 def read_h5_event_file(path: str | Path) -> np.ndarray:
-    """Read events from an HDF5 file with flexible key discovery."""
+    """Read events from an HDF5 file with flexible key discovery.
+
+    DSEC stores event timestamps relative to a per-file ``t_offset``. When that
+    scalar is present, add it so event timestamps share the annotation time
+    domain.
+    """
 
     import h5py
     import hdf5plugin  # noqa: F401
@@ -314,12 +319,20 @@ def read_h5_event_file(path: str | Path) -> np.ndarray:
             raise KeyError(f"Could not find any of {names} in {path}.")
         return matches[0]
 
+    def find_optional_scalar(handle: h5py.File, names: tuple[str, ...]) -> int:
+        try:
+            dataset = find_dataset(handle, names)
+        except KeyError:
+            return 0
+        return int(np.asarray(dataset).item())
+
     with h5py.File(path, "r") as handle:
         x = np.asarray(find_dataset(handle, ("x", "xs")), dtype=np.uint16)
         y = np.asarray(find_dataset(handle, ("y", "ys")), dtype=np.uint16)
         t = np.asarray(find_dataset(handle, ("t", "ts", "timestamp")), dtype=np.int64)
         p = np.asarray(find_dataset(handle, ("p", "polarity")), dtype=bool)
-    return event_array(x, y, t, p)
+        t_offset = find_optional_scalar(handle, ("t_offset",))
+    return event_array(x, y, t + t_offset, p)
 
 
 def read_metavision_dat(path: str | Path, max_events: int = 0) -> np.ndarray:
