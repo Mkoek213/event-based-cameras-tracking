@@ -7,6 +7,7 @@ from src.data.converters.event_manifest import (
     group_boxes_by_timestamp,
     load_structured_boxes,
     read_h5_event_file,
+    read_metavision_dat,
     save_dense_representations,
     select_event_window,
     split_rows,
@@ -91,3 +92,19 @@ def test_h5_event_reader_applies_t_offset(tmp_path):
 
     assert events["t"].tolist() == [1010, 1020]
     assert events["x"].tolist() == [1, 2]
+
+
+def test_metavision_dat_fallback_skips_binary_type_size_header(tmp_path):
+    path = tmp_path / "sample_td.dat"
+    timestamp = np.array([1234], dtype="<u4")
+    data = np.array([(1 << 28) | (20 << 14) | 10], dtype="<u4")
+    path.write_bytes(
+        b"% Width 1280\n% Height 720\n" + bytes([12, 8]) + timestamp.tobytes() + data.tobytes()
+    )
+
+    events = read_metavision_dat(path)
+
+    assert events["t"].tolist() == [1234]
+    assert events["x"].tolist() == [10]
+    assert events["y"].tolist() == [20]
+    assert events["p"].tolist() == [True]

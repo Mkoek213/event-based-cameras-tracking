@@ -365,6 +365,12 @@ def _read_metavision_dat_fallback(path: str | Path, max_events: int = 0) -> np.n
                 break
         payload = handle.read()
 
+    # Metavision DAT files store a compact binary header after the ASCII
+    # comments: one byte event type and one byte event size. Skip it when
+    # present; otherwise the 8-byte event records are misaligned.
+    if len(payload) >= 2 and payload[1] in {8, 12, 16}:
+        payload = payload[2:]
+
     event_size = 8
     if len(payload) < event_size:
         return np.empty(0, dtype=EVENT_DTYPE)
