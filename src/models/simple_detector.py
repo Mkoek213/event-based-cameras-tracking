@@ -18,6 +18,7 @@ class SimpleDetectorConfig:
     num_classes: int = 7
     feature_stride: int = 8
     width: int = 32
+    architecture: str = "simple"
     fusion_mode: str = "single"
     event_frame_channels: int = 2
     voxel_grid_channels: int = 0
@@ -38,6 +39,92 @@ class ConvBlock(nn.Sequential):
         )
 
 
+class ResidualBlock(nn.Module):
+    """Small residual block used by the stronger detector backbone."""
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            ConvBlock(channels, channels),
+            ConvBlock(channels, channels),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.layers(x)
+
+
+class CSPBlock(nn.Module):
+    """Compact CSP-style block inspired by YOLO/CSPDarknet backbones."""
+
+    def __init__(self, channels: int, num_blocks: int) -> None:
+        super().__init__()
+        hidden = max(channels // 2, 8)
+        self.left = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(inplace=True),
+            *[ResidualBlock(hidden) for _ in range(num_blocks)],
+        )
+        self.right = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(inplace=True),
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv2d(2 * hidden, channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.SiLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fuse(torch.cat([self.left(x), self.right(x)], dim=1))
+
+
+class CSPStage(nn.Sequential):
+    """Downsample then process features with a CSP block."""
+
+    def __init__(self, in_channels: int, out_channels: int, num_blocks: int) -> None:
+        super().__init__(
+            ConvBlock(in_channels, out_channels, stride=2),
+            CSPBlock(out_channels, num_blocks=num_blocks),
+        )
+
+
+class CSPPANBackbone(nn.Module):
+    """CSPDarknet/PAN-style backbone that returns stride-8 features."""
+
+    def __init__(self, in_channels: int, width: int, depth: int = 2) -> None:
+        super().__init__()
+        depth = max(depth, 1)
+        self.stem = ConvBlock(in_channels, width)
+        self.stage2 = CSPStage(width, width, num_blocks=depth)
+        self.stage4 = CSPStage(width, 2 * width, num_blocks=depth)
+        self.stage8 = CSPStage(2 * width, 4 * width, num_blocks=depth + 1)
+        self.stage16 = CSPStage(4 * width, 8 * width, num_blocks=depth + 1)
+
+        self.lateral16 = nn.Sequential(
+            nn.Conv2d(8 * width, 4 * width, kernel_size=1, bias=False),
+            nn.BatchNorm2d(4 * width),
+            nn.SiLU(inplace=True),
+        )
+        self.fuse8 = CSPBlock(8 * width, num_blocks=depth)
+        self.output = nn.Sequential(
+            nn.Conv2d(8 * width, 4 * width, kernel_size=1, bias=False),
+            nn.BatchNorm2d(4 * width),
+            nn.SiLU(inplace=True),
+            ConvBlock(4 * width, 4 * width),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        c2 = self.stage2(x)
+        c4 = self.stage4(c2)
+        c8 = self.stage8(c4)
+        c16 = self.stage16(c8)
+        up16 = F.interpolate(self.lateral16(c16), size=c8.shape[-2:], mode="nearest")
+        return self.output(self.fuse8(torch.cat([c8, up16], dim=1)))
+
+
 class SimpleDenseDetector(nn.Module):
     """A YOLO-like dense detector with a fixed stride-8 output grid.
 
@@ -49,6 +136,8 @@ class SimpleDenseDetector(nn.Module):
         super().__init__()
         if config.feature_stride != 8:
             raise ValueError("SimpleDenseDetector currently supports feature_stride=8 only.")
+        if config.architecture not in ("simple", "csp_pan"):
+            raise ValueError(f"Unknown architecture '{config.architecture}'.")
         if config.fusion_mode not in (
             "single",
             "two_branch",
@@ -140,15 +229,18 @@ class SimpleDenseDetector(nn.Module):
             self.fusion = None
             self.gate = None
 
-        self.backbone = nn.Sequential(
-            ConvBlock(backbone_in_channels, w, stride=2),
-            ConvBlock(w, w),
-            ConvBlock(w, 2 * w, stride=2),
-            ConvBlock(2 * w, 2 * w),
-            ConvBlock(2 * w, 4 * w, stride=2),
-            ConvBlock(4 * w, 4 * w),
-            ConvBlock(4 * w, 4 * w),
-        )
+        if config.architecture == "simple":
+            self.backbone = nn.Sequential(
+                ConvBlock(backbone_in_channels, w, stride=2),
+                ConvBlock(w, w),
+                ConvBlock(w, 2 * w, stride=2),
+                ConvBlock(2 * w, 2 * w),
+                ConvBlock(2 * w, 4 * w, stride=2),
+                ConvBlock(4 * w, 4 * w),
+                ConvBlock(4 * w, 4 * w),
+            )
+        else:
+            self.backbone = CSPPANBackbone(backbone_in_channels, w)
         self.cls_head = nn.Sequential(
             ConvBlock(4 * w, 4 * w),
             nn.Conv2d(4 * w, config.num_classes + 1, kernel_size=1),

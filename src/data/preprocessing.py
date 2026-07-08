@@ -25,8 +25,7 @@ class EventPreprocessor:
     ) -> None:
         if representation not in self.REPRESENTATIONS:
             raise ValueError(
-                f"Unknown representation '{representation}'. "
-                f"Choose one of {self.REPRESENTATIONS}."
+                f"Unknown representation '{representation}'. Choose one of {self.REPRESENTATIONS}."
             )
         if num_bins <= 0:
             raise ValueError("num_bins must be positive.")

@@ -98,6 +98,33 @@ def test_gated_two_branch_detector_output_shapes():
     assert model.gate is not None
 
 
+def test_csp_pan_detector_output_shapes():
+    model = SimpleDenseDetector(
+        SimpleDetectorConfig(in_channels=12, width=8, architecture="csp_pan")
+    )
+    outputs = model(torch.zeros((2, 12, 480, 640)))
+
+    assert outputs["cls_logits"].shape == (2, 8, 60, 80)
+    assert outputs["bbox_raw"].shape == (2, 4, 60, 80)
+
+
+def test_csp_pan_gated_two_branch_detector_output_shapes():
+    model = SimpleDenseDetector(
+        SimpleDetectorConfig(
+            in_channels=12,
+            width=8,
+            architecture="csp_pan",
+            fusion_mode="gated_two_branch",
+            component_channels=(2, 10),
+        )
+    )
+    outputs = model(torch.zeros((2, 12, 480, 640)))
+
+    assert outputs["cls_logits"].shape == (2, 8, 60, 80)
+    assert outputs["bbox_raw"].shape == (2, 4, 60, 80)
+    assert model.gate is not None
+
+
 def test_representation_normalisation_scales_components_independently():
     tensor = torch.zeros((1, 3, 2, 2))
     tensor[:, :2] = 100.0

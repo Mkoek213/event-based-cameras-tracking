@@ -10,6 +10,7 @@ from typing import Callable, Optional, Sequence
 
 import numpy as np
 
+from src.data.dense_targets import DenseBox, encode_dense_targets
 
 EVENT_WIDTH = 640
 EVENT_HEIGHT = 480
@@ -27,8 +28,8 @@ class Annotation:
 
 
 def _import_h5() -> tuple[object, object]:
-    import hdf5plugin  # noqa: F401  Registers HDF5 compression plugins.
     import h5py
+    import hdf5plugin  # noqa: F401  Registers HDF5 compression plugins.
 
     return h5py, np
 
@@ -225,59 +226,24 @@ class EventDataset:
     def _encode_targets(
         self, annotations: list[Annotation]
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        feat_h = EVENT_HEIGHT // self.feature_stride
-        feat_w = EVENT_WIDTH // self.feature_stride
-        cls_targets = np.zeros((feat_h, feat_w), dtype=np.int64)
-        bbox_targets = np.zeros((4, feat_h, feat_w), dtype=np.float32)
-        pos_mask = np.zeros((feat_h, feat_w), dtype=bool)
-        assignment_distance = np.full((feat_h, feat_w), np.inf, dtype=np.float32)
-
-        for ann in annotations:
-            x0 = max(0.0, ann.left)
-            y0 = max(0.0, ann.top)
-            x1 = min(float(EVENT_WIDTH - 1), ann.left + ann.width)
-            y1 = min(float(EVENT_HEIGHT - 1), ann.top + ann.height)
-            if x1 <= x0 or y1 <= y0:
-                continue
-
-            center_x = 0.5 * (x0 + x1)
-            center_y = 0.5 * (y0 + y1)
-            center_gx = center_x / self.feature_stride - 0.5
-            center_gy = center_y / self.feature_stride - 0.5
-            gx = int(round(center_gx))
-            gy = int(round(center_gy))
-            if gx < 0 or gx >= feat_w or gy < 0 or gy >= feat_h:
-                continue
-
-            # Keep assignment radius explicit and small. Broad adaptive positives
-            # encourage foreground blobs instead of precise detections.
-            radius = self.positive_radius
-
-            x_start = max(gx - radius, 0)
-            x_end = min(gx + radius, feat_w - 1)
-            y_start = max(gy - radius, 0)
-            y_end = min(gy + radius, feat_h - 1)
-
-            for gy_idx in range(y_start, y_end + 1):
-                for gx_idx in range(x_start, x_end + 1):
-                    dx = gx_idx - center_gx
-                    dy = gy_idx - center_gy
-                    distance = float(dx * dx + dy * dy)
-                    if distance >= assignment_distance[gy_idx, gx_idx]:
-                        continue
-
-                    cls_targets[gy_idx, gx_idx] = ann.class_id + self.class_offset
-                    pos_mask[gy_idx, gx_idx] = True
-                    assignment_distance[gy_idx, gx_idx] = distance
-
-                    cell_cx = (gx_idx + 0.5) * self.feature_stride
-                    cell_cy = (gy_idx + 0.5) * self.feature_stride
-                    bbox_targets[0, gy_idx, gx_idx] = (cell_cx - x0) / self.feature_stride
-                    bbox_targets[1, gy_idx, gx_idx] = (cell_cy - y0) / self.feature_stride
-                    bbox_targets[2, gy_idx, gx_idx] = (x1 - cell_cx) / self.feature_stride
-                    bbox_targets[3, gy_idx, gx_idx] = (y1 - cell_cy) / self.feature_stride
-
-        return cls_targets, bbox_targets, pos_mask
+        boxes = [
+            DenseBox(
+                left=annotation.left,
+                top=annotation.top,
+                width=annotation.width,
+                height=annotation.height,
+                class_id=annotation.class_id,
+            )
+            for annotation in annotations
+        ]
+        return encode_dense_targets(
+            boxes=boxes,
+            image_width=EVENT_WIDTH,
+            image_height=EVENT_HEIGHT,
+            feature_stride=self.feature_stride,
+            positive_radius=self.positive_radius,
+            class_offset=self.class_offset,
+        )
 
     def __getitem__(self, idx: int) -> dict:
         sample_info = self._samples[idx]
