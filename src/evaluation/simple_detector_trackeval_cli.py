@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Export detections from the lightweight detector, track them, and run TrackEval."""
+"""Export detections from the lightweight detector, track them, and run TrackEval.
+
+Appearance-based association with an embedding-head checkpoint
+(trained via ``src.training.recurrent_embedding_detector``):
+
+    .venv/bin/python -m src.evaluation.simple_detector_trackeval_cli \\
+      --checkpoint runs/recurrent_embedding/<run>/best.pt \\
+      --root data/datasets/dsec_mot \\
+      --split test --sequences interlaken_00_d \\
+      --tracker-backend boxmot_botsort --track-with-reid \\
+      --device cuda \\
+      --run-name gated_recurrent_embed_botsort_reid
+
+Motion-only BoT-SORT ablation on the same checkpoint: drop ``--track-with-reid``.
+IoU baseline on a plain gated checkpoint: ``--tracker-backend iou``.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +30,7 @@ from src.data.pretrained_detection_dataset import ErosSnapshotStore
 from src.data.representations import (
     REPRESENTATION_CHOICES,
     BenchmarkRepresentation,
+    representation_channel_splits,
     representation_components,
 )
 from src.evaluation.detection_export import (
@@ -23,7 +39,7 @@ from src.evaluation.detection_export import (
     load_image_timestamps,
     read_events,
 )
-from src.evaluation.simple_tracker import track_detections
+from src.evaluation.mot_trackers import TrackingConfig, track_detections
 from src.evaluation.trackeval_adapter import (
     TRACKEVAL_CLASS_NAMES,
     export_trackeval_bundle,
@@ -37,6 +53,7 @@ from src.models.simple_detector import (
     SimpleDetectorConfig,
     decode_dense_detections,
     normalise_event_tensor,
+    normalise_representation_tensor,
 )
 
 DEFAULT_TEST_SEQUENCES = ["interlaken_00_d", "zurich_city_00_b"]
@@ -68,6 +85,7 @@ def export_simple_detector_detections_for_sequence(
     eros_store: ErosSnapshotStore | None = None,
     start_frame: int = 0,
     max_frames: int = 0,
+    input_normalisation: str = "whole",
 ) -> dict:
     seq_dir = root / split / sequence
     events_h5 = seq_dir / "events_left" / "events.h5"
@@ -93,6 +111,15 @@ def export_simple_detector_detections_for_sequence(
         width=EVENT_WIDTH,
     )
 
+    if input_normalisation not in ("whole", "component"):
+        raise ValueError(f"Unknown input_normalisation '{input_normalisation}'.")
+    component_splits = (
+        representation_channel_splits(representation, num_bins)
+        if input_normalisation == "component"
+        else ()
+    )
+    has_embedding_head = model.config.embedding_dim > 0
+
     all_detections: list[DetectionRecord] = []
     frames_payload = [
         {"frame_index": frame_index, "timestamp": timestamp}
@@ -100,6 +127,7 @@ def export_simple_detector_detections_for_sequence(
     ]
     handle, x, y, p, t, ms_to_idx, t_offset, _ = load_event_file(events_h5)
     started = time.perf_counter()
+    embedding_state = None
     try:
         total = len(frame_entries)
         for position, (frame_index, timestamp_us) in enumerate(frame_entries, start=1):
@@ -120,9 +148,13 @@ def export_simple_detector_detections_for_sequence(
             )
             dense = transform(events, eros=eros)
             tensor = torch.from_numpy(dense).float().unsqueeze(0).to(device, non_blocking=True)
-            tensor = normalise_event_tensor(tensor)
+            if input_normalisation == "component":
+                tensor = normalise_representation_tensor(tensor, component_splits)
+            else:
+                tensor = normalise_event_tensor(tensor)
             with torch.inference_mode():
-                outputs = model(tensor)
+                outputs = model(tensor, embedding_state)
+                embedding_state = outputs.get("embedding_state")
                 detections = decode_dense_detections(
                     outputs=outputs,
                     frame_index=frame_index,
@@ -131,6 +163,7 @@ def export_simple_detector_detections_for_sequence(
                     nms_iou_threshold=nms_iou_threshold,
                     max_detections=max_detections,
                     feature_stride=model.config.feature_stride,
+                    embeddings=outputs.get("embeddings") if has_embedding_head else None,
                 )
             all_detections.extend(detections)
             if position == 1 or position == total or position % 100 == 0:
@@ -155,6 +188,8 @@ def export_simple_detector_detections_for_sequence(
         "representation": representation,
         "num_bins": num_bins,
         "time_window_us": time_window_us,
+        "input_normalisation": input_normalisation,
+        "embedding_dim": model.config.embedding_dim,
         "model_config": checkpoint["model_config"],
         "benchmark_config": checkpoint.get("benchmark_config", {}),
         "elapsed_s": elapsed_s,
@@ -182,6 +217,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--track-iou-threshold", type=float, default=0.5)
     parser.add_argument("--track-max-missed-frames", type=int, default=2)
     parser.add_argument("--track-min-hits", type=int, default=1)
+    parser.add_argument(
+        "--tracker-backend",
+        choices=[
+            "iou",
+            "sort",
+            "bytetrack",
+            "boxmot_bytetrack",
+            "boxmot_ocsort",
+            "boxmot_botsort",
+        ],
+        default="iou",
+        help="Tracking backend used after detector export.",
+    )
+    parser.add_argument("--track-high-threshold", type=float, default=0.6)
+    parser.add_argument("--track-low-threshold", type=float, default=0.1)
+    parser.add_argument(
+        "--track-with-reid",
+        action="store_true",
+        help=(
+            "Feed exported detection embeddings into BoT-SORT appearance matching. "
+            "Requires --tracker-backend boxmot_botsort and an embedding-head checkpoint."
+        ),
+    )
+    parser.add_argument("--track-appearance-thresh", type=float, default=0.25)
+    parser.add_argument("--track-proximity-thresh", type=float, default=0.5)
+    parser.add_argument(
+        "--input-normalisation",
+        choices=("auto", "whole", "component"),
+        default="auto",
+        help=(
+            "Input normalisation during export. 'component' matches training for fused "
+            "representations; 'whole' is the historical export behaviour. 'auto' picks "
+            "'component' for embedding-head checkpoints and 'whole' otherwise, keeping "
+            "previously reported baselines unchanged."
+        ),
+    )
     parser.add_argument("--eval-iou-threshold", type=float, default=0.5)
     parser.add_argument(
         "--classes-to-eval",
@@ -192,7 +263,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=0)
-    parser.add_argument("--tracker-name", default="simple_dense_detector_iou")
+    parser.add_argument("--tracker-name", default=None)
     parser.add_argument("--trackeval-root", type=Path, default=Path("external/TrackEval"))
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
@@ -210,6 +281,16 @@ def main() -> int:
 
     model, checkpoint = load_model(args.checkpoint, device)
     checkpoint["checkpoint_path"] = str(args.checkpoint)
+    if args.track_with_reid and args.tracker_backend != "boxmot_botsort":
+        raise SystemExit("--track-with-reid requires --tracker-backend boxmot_botsort.")
+    if args.track_with_reid and model.config.embedding_dim <= 0:
+        raise SystemExit(
+            "--track-with-reid requires a checkpoint with an embedding head "
+            "(train with src.training.recurrent_embedding_detector)."
+        )
+    input_normalisation = args.input_normalisation
+    if input_normalisation == "auto":
+        input_normalisation = "component" if model.config.embedding_dim > 0 else "whole"
     benchmark_config = checkpoint.get("benchmark_config", {})
     representation = args.representation or benchmark_config.get("representation", "voxel_grid")
     num_bins = (
@@ -229,6 +310,10 @@ def main() -> int:
         else None
     )
 
+    tracker_suffix = (
+        f"{args.tracker_backend}_reid" if args.track_with_reid else args.tracker_backend
+    )
+    tracker_name = args.tracker_name or f"simple_dense_detector_{tracker_suffix}"
     run_name = args.run_name or f"{args.checkpoint.stem}_{representation}_{args.split}"
     output_root = args.output_root / run_name
     detections_dir = output_root / "detections"
@@ -258,6 +343,7 @@ def main() -> int:
             eros_store=eros_store,
             start_frame=args.start_frame,
             max_frames=args.max_frames,
+            input_normalisation=input_normalisation,
         )
 
         track_path = tracks_dir / f"{sequence}.txt"
@@ -265,9 +351,17 @@ def main() -> int:
         tracker_runs[sequence] = track_detections(
             detection_export_path=detection_path,
             output_path=track_path,
-            iou_threshold=args.track_iou_threshold,
-            max_missed_frames=args.track_max_missed_frames,
-            min_hits=args.track_min_hits,
+            config=TrackingConfig(
+                backend=args.tracker_backend,
+                iou_threshold=args.track_iou_threshold,
+                max_missed_frames=args.track_max_missed_frames,
+                min_hits=args.track_min_hits,
+                high_threshold=args.track_high_threshold,
+                low_threshold=args.track_low_threshold,
+                with_reid=args.track_with_reid,
+                appearance_thresh=args.track_appearance_thresh,
+                proximity_thresh=args.track_proximity_thresh,
+            ),
         )
 
     (output_root / "detection_runs.json").write_text(
@@ -282,7 +376,7 @@ def main() -> int:
         dataset_root=args.root,
         split=args.split,
         sequences=sequences,
-        tracker_name=args.tracker_name,
+        tracker_name=tracker_name,
         tracker_results_dir=tracks_dir,
         output_root=trackeval_dir,
     )
@@ -297,7 +391,7 @@ def main() -> int:
     )
     summary = summarise_trackeval_results(
         results=raw_results,
-        tracker_name=args.tracker_name,
+        tracker_name=tracker_name,
         eval_iou_threshold=args.eval_iou_threshold,
         trackeval_root=args.trackeval_root,
         classes_to_eval=args.classes_to_eval,
