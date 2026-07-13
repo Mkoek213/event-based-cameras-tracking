@@ -23,6 +23,9 @@ class SimpleDetectorConfig:
     event_frame_channels: int = 2
     voxel_grid_channels: int = 0
     component_channels: tuple[int, ...] = ()
+    embedding_dim: int = 0
+    embedding_recurrent: bool = False
+    embedding_hidden_dim: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -37,6 +40,39 @@ class ConvBlock(nn.Sequential):
             nn.BatchNorm2d(out_channels),
             nn.SiLU(inplace=True),
         )
+
+
+class ConvGRUCell(nn.Module):
+    """Convolutional GRU cell keeping a spatial hidden state across frames."""
+
+    def __init__(self, input_channels: int, hidden_channels: int) -> None:
+        super().__init__()
+        self.hidden_channels = hidden_channels
+        self.update_gate = nn.Conv2d(
+            input_channels + hidden_channels, hidden_channels, kernel_size=3, padding=1
+        )
+        self.reset_gate = nn.Conv2d(
+            input_channels + hidden_channels, hidden_channels, kernel_size=3, padding=1
+        )
+        self.candidate = nn.Conv2d(
+            input_channels + hidden_channels, hidden_channels, kernel_size=3, padding=1
+        )
+
+    def forward(self, x: torch.Tensor, hidden: torch.Tensor | None = None) -> torch.Tensor:
+        if hidden is None:
+            hidden = torch.zeros(
+                x.shape[0],
+                self.hidden_channels,
+                x.shape[2],
+                x.shape[3],
+                device=x.device,
+                dtype=x.dtype,
+            )
+        combined = torch.cat([hidden, x], dim=1)
+        update = torch.sigmoid(self.update_gate(combined))
+        reset = torch.sigmoid(self.reset_gate(combined))
+        candidate = torch.tanh(self.candidate(torch.cat([reset * hidden, x], dim=1)))
+        return (1.0 - update) * hidden + update * candidate
 
 
 class ResidualBlock(nn.Module):
@@ -250,7 +286,21 @@ class SimpleDenseDetector(nn.Module):
             nn.Conv2d(4 * w, 4, kernel_size=1),
         )
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        if config.embedding_dim > 0:
+            hidden = config.embedding_hidden_dim or config.embedding_dim
+            self.embedding_proj = ConvBlock(4 * w, hidden)
+            self.embedding_recurrent_cell = (
+                ConvGRUCell(hidden, hidden) if config.embedding_recurrent else None
+            )
+            self.embedding_head = nn.Conv2d(hidden, config.embedding_dim, kernel_size=1)
+        else:
+            self.embedding_proj = None
+            self.embedding_recurrent_cell = None
+            self.embedding_head = None
+
+    def forward(
+        self, x: torch.Tensor, embedding_state: torch.Tensor | None = None
+    ) -> dict[str, torch.Tensor]:
         if self.input_stems is not None:
             components = torch.split(x, self.component_channels, dim=1)
             features = [stem(component) for stem, component in zip(self.input_stems, components)]
@@ -268,10 +318,20 @@ class SimpleDenseDetector(nn.Module):
             voxel_grid_features = self.voxel_grid_stem(voxel_grid)
             x = self.fusion(torch.cat([event_frame_features, voxel_grid_features], dim=1))
         features = self.backbone(x)
-        return {
+        outputs = {
             "cls_logits": self.cls_head(features),
             "bbox_raw": self.bbox_head(features),
         }
+        if self.embedding_head is not None:
+            embedding_features = self.embedding_proj(features)
+            if self.embedding_recurrent_cell is not None:
+                embedding_state = self.embedding_recurrent_cell(embedding_features, embedding_state)
+                embeddings = self.embedding_head(embedding_state)
+            else:
+                embeddings = self.embedding_head(embedding_features)
+            outputs["embeddings"] = F.normalize(embeddings, dim=1)
+            outputs["embedding_state"] = embedding_state
+        return outputs
 
     @staticmethod
     def bbox_distances(bbox_raw: torch.Tensor) -> torch.Tensor:
@@ -382,14 +442,21 @@ def decode_dense_detections(
     image_width: int = EVENT_WIDTH,
     image_height: int = EVENT_HEIGHT,
     feature_stride: int = 8,
+    embeddings: torch.Tensor | None = None,
 ) -> list[DetectionRecord]:
-    """Decode one model output into DetectionRecord rows."""
+    """Decode one model output into DetectionRecord rows.
+
+    When ``embeddings`` is given (``(D, H, W)`` cell embeddings), each detection
+    carries the embedding vector of the feature cell that produced it.
+    """
     cls_logits = outputs["cls_logits"]
     bbox_raw = outputs["bbox_raw"]
     if cls_logits.ndim == 4:
         cls_logits = cls_logits[0]
     if bbox_raw.ndim == 4:
         bbox_raw = bbox_raw[0]
+    if embeddings is not None and embeddings.ndim == 4:
+        embeddings = embeddings[0]
 
     probabilities = cls_logits.softmax(dim=0)
     foreground = probabilities[1:]
@@ -417,6 +484,8 @@ def decode_dense_detections(
     boxes = boxes[valid]
     scores = scores[valid]
     labels = labels[valid]
+    ys = ys[valid]
+    xs = xs[valid]
 
     keep = _class_aware_nms(boxes, scores, labels, nms_iou_threshold, max_detections)
     detections: list[DetectionRecord] = []
@@ -424,6 +493,10 @@ def decode_dense_detections(
         box = boxes[idx].detach().cpu()
         score = float(scores[idx].detach().cpu())
         class_id = int(labels[idx].detach().cpu())
+        embedding = None
+        if embeddings is not None:
+            vector = embeddings[:, ys[idx], xs[idx]].detach().cpu()
+            embedding = tuple(float(value) for value in vector)
         detections.append(
             DetectionRecord(
                 frame_index=frame_index,
@@ -434,6 +507,7 @@ def decode_dense_detections(
                 bbox_top=float(box[1]),
                 bbox_width=float(box[2] - box[0]),
                 bbox_height=float(box[3] - box[1]),
+                embedding=embedding,
             )
         )
     return detections

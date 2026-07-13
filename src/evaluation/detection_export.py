@@ -43,9 +43,15 @@ class DetectionRecord:
     bbox_top: float
     bbox_width: float
     bbox_height: float
+    embedding: tuple[float, ...] | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        if data["embedding"] is None:
+            del data["embedding"]
+        else:
+            data["embedding"] = list(data["embedding"])
+        return data
 
 
 def load_annotations(path: Path) -> list[Annotation]:

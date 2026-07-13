@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+IDENTITY_IGNORE_INDEX = -1
+
 
 @dataclass(frozen=True)
 class DenseBox:
@@ -16,6 +18,7 @@ class DenseBox:
     width: float
     height: float
     class_id: int
+    identity: int = IDENTITY_IGNORE_INDEX
 
 
 def encode_dense_targets(
@@ -28,11 +31,38 @@ def encode_dense_targets(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Encode object boxes into class, bbox-distance and positive-cell tensors."""
 
+    cls_targets, bbox_targets, pos_mask, _ = encode_dense_targets_with_identity(
+        boxes=boxes,
+        image_width=image_width,
+        image_height=image_height,
+        feature_stride=feature_stride,
+        positive_radius=positive_radius,
+        class_offset=class_offset,
+    )
+    return cls_targets, bbox_targets, pos_mask
+
+
+def encode_dense_targets_with_identity(
+    boxes: list[DenseBox],
+    image_width: int,
+    image_height: int,
+    feature_stride: int = 8,
+    positive_radius: int = 1,
+    class_offset: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Encode boxes like :func:`encode_dense_targets` plus a per-cell identity map.
+
+    The identity map holds ``box.identity`` at every positive cell assigned to that
+    box and ``IDENTITY_IGNORE_INDEX`` elsewhere, so it lines up cell-for-cell with
+    ``pos_mask``.
+    """
+
     feat_h = image_height // feature_stride
     feat_w = image_width // feature_stride
     cls_targets = np.zeros((feat_h, feat_w), dtype=np.int64)
     bbox_targets = np.zeros((4, feat_h, feat_w), dtype=np.float32)
     pos_mask = np.zeros((feat_h, feat_w), dtype=bool)
+    identity_targets = np.full((feat_h, feat_w), IDENTITY_IGNORE_INDEX, dtype=np.int64)
     assignment_distance = np.full((feat_h, feat_w), np.inf, dtype=np.float32)
 
     for box in boxes:
@@ -68,6 +98,7 @@ def encode_dense_targets(
 
                 cls_targets[gy_idx, gx_idx] = box.class_id + class_offset
                 pos_mask[gy_idx, gx_idx] = True
+                identity_targets[gy_idx, gx_idx] = box.identity
                 assignment_distance[gy_idx, gx_idx] = distance
 
                 cell_cx = (gx_idx + 0.5) * feature_stride
@@ -77,4 +108,4 @@ def encode_dense_targets(
                 bbox_targets[2, gy_idx, gx_idx] = (x1 - cell_cx) / feature_stride
                 bbox_targets[3, gy_idx, gx_idx] = (y1 - cell_cy) / feature_stride
 
-    return cls_targets, bbox_targets, pos_mask
+    return cls_targets, bbox_targets, pos_mask, identity_targets
