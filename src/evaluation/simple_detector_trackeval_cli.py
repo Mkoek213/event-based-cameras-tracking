@@ -51,7 +51,9 @@ from src.evaluation.trackeval_adapter import (
 from src.models.simple_detector import (
     SimpleDenseDetector,
     SimpleDetectorConfig,
+    attach_detection_embeddings,
     decode_dense_detections,
+    detection_boxes_xyxy,
     normalise_event_tensor,
     normalise_representation_tensor,
 )
@@ -163,8 +165,16 @@ def export_simple_detector_detections_for_sequence(
                     nms_iou_threshold=nms_iou_threshold,
                     max_detections=max_detections,
                     feature_stride=model.config.feature_stride,
-                    embeddings=outputs.get("embeddings") if has_embedding_head else None,
                 )
+                if has_embedding_head:
+                    feature_map = outputs.get("embedding_feature_map")
+                    if not isinstance(feature_map, torch.Tensor):
+                        raise RuntimeError(
+                            "Embedding checkpoint did not return embedding_feature_map."
+                        )
+                    boxes = detection_boxes_xyxy(detections, feature_map)
+                    descriptors = model.extract_roi_embeddings(feature_map, [boxes])
+                    detections = attach_detection_embeddings(detections, descriptors)
             all_detections.extend(detections)
             if position == 1 or position == total or position % 100 == 0:
                 print(
@@ -190,6 +200,7 @@ def export_simple_detector_detections_for_sequence(
         "time_window_us": time_window_us,
         "input_normalisation": input_normalisation,
         "embedding_dim": model.config.embedding_dim,
+        "embedding_recurrent": model.config.embedding_recurrent,
         "model_config": checkpoint["model_config"],
         "benchmark_config": checkpoint.get("benchmark_config", {}),
         "elapsed_s": elapsed_s,
@@ -408,12 +419,14 @@ def main() -> int:
     for sequence, sequence_summary in summary["per_sequence"].items():
         metrics = sequence_summary["metrics"]
         print(
-            f"  {sequence}: HOTA={metrics['HOTA']:.4f} MOTA={metrics['MOTA']:.4f} "
+            f"  {sequence}: HOTA={metrics['HOTA']:.4f} AssA={metrics['AssA']:.4f} "
+            f"DetA={metrics['DetA']:.4f} MOTA={metrics['MOTA']:.4f} "
             f"IDF1={metrics['IDF1']:.4f} IDS={metrics['IDS']} FP={metrics['FP']} FN={metrics['FN']}"
         )
     aggregate = summary["aggregate"]
     print(
-        f"  COMBINED: HOTA={aggregate['HOTA']:.4f} MOTA={aggregate['MOTA']:.4f} "
+        f"  COMBINED: HOTA={aggregate['HOTA']:.4f} AssA={aggregate['AssA']:.4f} "
+        f"DetA={aggregate['DetA']:.4f} MOTA={aggregate['MOTA']:.4f} "
         f"IDF1={aggregate['IDF1']:.4f} IDS={aggregate['IDS']} "
         f"FP={aggregate['FP']} FN={aggregate['FN']}"
     )
