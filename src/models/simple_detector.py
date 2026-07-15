@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torchvision.ops import roi_align
 
 from src.data.dataset import EVENT_HEIGHT, EVENT_WIDTH
 from src.evaluation.detection_export import DetectionRecord
@@ -26,6 +27,7 @@ class SimpleDetectorConfig:
     embedding_dim: int = 0
     embedding_recurrent: bool = False
     embedding_hidden_dim: int = 0
+    embedding_roi_size: int = 7
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -288,19 +290,23 @@ class SimpleDenseDetector(nn.Module):
 
         if config.embedding_dim > 0:
             hidden = config.embedding_hidden_dim or config.embedding_dim
+            if config.embedding_roi_size <= 0:
+                raise ValueError("embedding_roi_size must be positive.")
             self.embedding_proj = ConvBlock(4 * w, hidden)
             self.embedding_recurrent_cell = (
                 ConvGRUCell(hidden, hidden) if config.embedding_recurrent else None
             )
-            self.embedding_head = nn.Conv2d(hidden, config.embedding_dim, kernel_size=1)
+            self.embedding_head = nn.Linear(hidden, config.embedding_dim)
+            self.embedding_bn = nn.BatchNorm1d(config.embedding_dim)
         else:
             self.embedding_proj = None
             self.embedding_recurrent_cell = None
             self.embedding_head = None
+            self.embedding_bn = None
 
     def forward(
         self, x: torch.Tensor, embedding_state: torch.Tensor | None = None
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor | None]:
         if self.input_stems is not None:
             components = torch.split(x, self.component_channels, dim=1)
             features = [stem(component) for stem, component in zip(self.input_stems, components)]
@@ -322,16 +328,63 @@ class SimpleDenseDetector(nn.Module):
             "cls_logits": self.cls_head(features),
             "bbox_raw": self.bbox_head(features),
         }
-        if self.embedding_head is not None:
+        if self.embedding_proj is not None:
             embedding_features = self.embedding_proj(features)
             if self.embedding_recurrent_cell is not None:
                 embedding_state = self.embedding_recurrent_cell(embedding_features, embedding_state)
-                embeddings = self.embedding_head(embedding_state)
+                embedding_features = embedding_state
             else:
-                embeddings = self.embedding_head(embedding_features)
-            outputs["embeddings"] = F.normalize(embeddings, dim=1)
+                embedding_state = None
+            outputs["embedding_feature_map"] = embedding_features
             outputs["embedding_state"] = embedding_state
         return outputs
+
+    def extract_roi_embeddings(
+        self,
+        feature_map: torch.Tensor,
+        boxes_per_image: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Extract one normalised descriptor per supplied box, preserving box order."""
+
+        if self.embedding_head is None or self.embedding_bn is None:
+            raise RuntimeError("RoI embeddings require an enabled embedding head.")
+        if feature_map.ndim != 4:
+            raise ValueError("feature_map must have shape (B, C, H, W).")
+        if len(boxes_per_image) != feature_map.shape[0]:
+            raise ValueError(
+                "boxes_per_image length must match the feature-map batch dimension: "
+                f"{len(boxes_per_image)} != {feature_map.shape[0]}."
+            )
+        boxes = [
+            box.to(device=feature_map.device, dtype=feature_map.dtype).reshape(-1, 4)
+            for box in boxes_per_image
+        ]
+        roi_count = sum(int(box.shape[0]) for box in boxes)
+        if roi_count == 0:
+            return feature_map.new_empty((0, self.config.embedding_dim))
+
+        pooled = roi_align(
+            feature_map,
+            boxes,
+            output_size=(self.config.embedding_roi_size, self.config.embedding_roi_size),
+            spatial_scale=1.0 / self.config.feature_stride,
+            aligned=True,
+        )
+        vectors = self.embedding_head(pooled.mean(dim=(-2, -1)))
+        if self.training and vectors.shape[0] < 2:
+            vectors = F.batch_norm(
+                vectors,
+                self.embedding_bn.running_mean,
+                self.embedding_bn.running_var,
+                self.embedding_bn.weight,
+                self.embedding_bn.bias,
+                training=False,
+                momentum=0.0,
+                eps=self.embedding_bn.eps,
+            )
+        else:
+            vectors = self.embedding_bn(vectors)
+        return F.normalize(vectors, dim=1)
 
     @staticmethod
     def bbox_distances(bbox_raw: torch.Tensor) -> torch.Tensor:
@@ -442,21 +495,14 @@ def decode_dense_detections(
     image_width: int = EVENT_WIDTH,
     image_height: int = EVENT_HEIGHT,
     feature_stride: int = 8,
-    embeddings: torch.Tensor | None = None,
 ) -> list[DetectionRecord]:
-    """Decode one model output into DetectionRecord rows.
-
-    When ``embeddings`` is given (``(D, H, W)`` cell embeddings), each detection
-    carries the embedding vector of the feature cell that produced it.
-    """
+    """Decode one model output and apply class-aware NMS."""
     cls_logits = outputs["cls_logits"]
     bbox_raw = outputs["bbox_raw"]
     if cls_logits.ndim == 4:
         cls_logits = cls_logits[0]
     if bbox_raw.ndim == 4:
         bbox_raw = bbox_raw[0]
-    if embeddings is not None and embeddings.ndim == 4:
-        embeddings = embeddings[0]
 
     probabilities = cls_logits.softmax(dim=0)
     foreground = probabilities[1:]
@@ -484,8 +530,6 @@ def decode_dense_detections(
     boxes = boxes[valid]
     scores = scores[valid]
     labels = labels[valid]
-    ys = ys[valid]
-    xs = xs[valid]
 
     keep = _class_aware_nms(boxes, scores, labels, nms_iou_threshold, max_detections)
     detections: list[DetectionRecord] = []
@@ -493,10 +537,6 @@ def decode_dense_detections(
         box = boxes[idx].detach().cpu()
         score = float(scores[idx].detach().cpu())
         class_id = int(labels[idx].detach().cpu())
-        embedding = None
-        if embeddings is not None:
-            vector = embeddings[:, ys[idx], xs[idx]].detach().cpu()
-            embedding = tuple(float(value) for value in vector)
         detections.append(
             DetectionRecord(
                 frame_index=frame_index,
@@ -507,7 +547,44 @@ def decode_dense_detections(
                 bbox_top=float(box[1]),
                 bbox_width=float(box[2] - box[0]),
                 bbox_height=float(box[3] - box[1]),
-                embedding=embedding,
             )
         )
     return detections
+
+
+def detection_boxes_xyxy(
+    detections: list[DetectionRecord],
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Convert exported-order detections to an RoI tensor on ``reference``."""
+
+    if not detections:
+        return reference.new_empty((0, 4))
+    return reference.new_tensor(
+        [
+            [
+                detection.bbox_left,
+                detection.bbox_top,
+                detection.bbox_left + detection.bbox_width,
+                detection.bbox_top + detection.bbox_height,
+            ]
+            for detection in detections
+        ]
+    )
+
+
+def attach_detection_embeddings(
+    detections: list[DetectionRecord], embeddings: torch.Tensor
+) -> list[DetectionRecord]:
+    """Attach descriptor rows to detections without changing their order."""
+
+    if embeddings.ndim != 2 or embeddings.shape[0] != len(detections):
+        raise ValueError(
+            f"Embedding shape {tuple(embeddings.shape)} does not align with "
+            f"{len(detections)} detections."
+        )
+    rows = embeddings.detach().cpu()
+    return [
+        replace(detection, embedding=tuple(float(value) for value in row))
+        for detection, row in zip(detections, rows)
+    ]
