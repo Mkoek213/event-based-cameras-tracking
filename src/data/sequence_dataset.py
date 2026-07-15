@@ -1,4 +1,4 @@
-"""Ordered clip dataset for recurrent embedding training on DSEC-MOT."""
+"""Ordered DSEC-MOT clips with dense detection and object-level ReID targets."""
 
 from __future__ import annotations
 
@@ -17,6 +17,22 @@ from src.data.dense_targets import (
 )
 from src.data.pretrained_detection_dataset import ErosSnapshotStore
 from src.data.representations import BenchmarkRepresentation, representation_components
+
+
+def _clip_annotation_box(annotation: object) -> tuple[float, float, float, float] | None:
+    """Clip one annotation to the image and return a valid absolute ``xyxy`` box."""
+
+    left = float(getattr(annotation, "left"))
+    top = float(getattr(annotation, "top"))
+    right = left + float(getattr(annotation, "width"))
+    bottom = top + float(getattr(annotation, "height"))
+    x0 = min(max(left, 0.0), float(EVENT_WIDTH))
+    y0 = min(max(top, 0.0), float(EVENT_HEIGHT))
+    x1 = min(max(right, 0.0), float(EVENT_WIDTH))
+    y1 = min(max(bottom, 0.0), float(EVENT_HEIGHT))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
 
 
 class IdentityVocabulary:
@@ -52,8 +68,8 @@ class DSECClipDataset(Dataset):
     """Yield clips of consecutive annotated frames from single DSEC-MOT sequences.
 
     Each item covers ``clip_length`` frames of one sequence and provides, per
-    frame, the dense event representation, detection targets and an identity map
-    aligned with ``pos_mask`` (see ``encode_dense_targets_with_identity``).
+    frame, the dense event representation and detection targets plus variable-length
+    RoI boxes, training identity indices, raw track IDs and class IDs.
     Clips never cross sequence boundaries; tails shorter than ``clip_length``
     are dropped.
     """
@@ -136,17 +152,25 @@ class DSECClipDataset(Dataset):
             eros = self.eros_store.get(
                 self.split, sample["sequence"], sample["frame_index"], sample["timestamp"]
             )
-        boxes = [
-            DenseBox(
-                left=annotation.left,
-                top=annotation.top,
-                width=annotation.width,
-                height=annotation.height,
-                class_id=annotation.class_id,
-                identity=self.identity_vocabulary.lookup(sample["sequence"], annotation.track_id),
+        valid_annotations = []
+        for annotation in sample["annotations"]:
+            clipped = _clip_annotation_box(annotation)
+            if clipped is not None:
+                valid_annotations.append((annotation, clipped))
+        boxes = []
+        for annotation, (x0, y0, x1, y1) in valid_annotations:
+            boxes.append(
+                DenseBox(
+                    left=x0,
+                    top=y0,
+                    width=x1 - x0,
+                    height=y1 - y0,
+                    class_id=annotation.class_id,
+                    identity=self.identity_vocabulary.lookup(
+                        sample["sequence"], annotation.track_id
+                    ),
+                )
             )
-            for annotation in sample["annotations"]
-        ]
         cls_targets, bbox_targets, pos_mask, identity_targets = encode_dense_targets_with_identity(
             boxes=boxes,
             image_width=EVENT_WIDTH,
@@ -160,11 +184,27 @@ class DSECClipDataset(Dataset):
             "bbox": bbox_targets,
             "pos_mask": pos_mask,
             "identity": identity_targets,
+            "roi_boxes": np.asarray(
+                [clipped for _, clipped in valid_annotations], dtype=np.float32
+            ).reshape(-1, 4),
+            "roi_identity_targets": np.asarray(
+                [
+                    self.identity_vocabulary.lookup(sample["sequence"], annotation.track_id)
+                    for annotation, _ in valid_annotations
+                ],
+                dtype=np.int64,
+            ),
+            "roi_track_ids": np.asarray(
+                [annotation.track_id for annotation, _ in valid_annotations], dtype=np.int64
+            ),
+            "roi_class_ids": np.asarray(
+                [annotation.class_id for annotation, _ in valid_annotations], dtype=np.int64
+            ),
             "meta": {
                 "sequence": sample["sequence"],
                 "timestamp": sample["timestamp"],
                 "frame_index": sample["frame_index"],
-                "num_annotations": len(sample["annotations"]),
+                "num_annotations": len(valid_annotations),
             },
         }
 
@@ -176,6 +216,10 @@ class DSECClipDataset(Dataset):
             "bbox": np.stack([frame["bbox"] for frame in frames]),
             "pos_mask": np.stack([frame["pos_mask"] for frame in frames]),
             "identity": np.stack([frame["identity"] for frame in frames]),
+            "roi_boxes": [frame["roi_boxes"] for frame in frames],
+            "roi_identity_targets": [frame["roi_identity_targets"] for frame in frames],
+            "roi_track_ids": [frame["roi_track_ids"] for frame in frames],
+            "roi_class_ids": [frame["roi_class_ids"] for frame in frames],
             "meta": [frame["meta"] for frame in frames],
         }
 
@@ -195,5 +239,21 @@ def collate_clip_batch(samples: list[dict]) -> dict[str, object]:
         "identity_targets": torch.stack(
             [torch.from_numpy(sample["identity"]).long() for sample in samples]
         ),
+        "roi_boxes": [
+            [torch.from_numpy(frame).float() for frame in sample["roi_boxes"]]
+            for sample in samples
+        ],
+        "roi_identity_targets": [
+            [torch.from_numpy(frame).long() for frame in sample["roi_identity_targets"]]
+            for sample in samples
+        ],
+        "roi_track_ids": [
+            [torch.from_numpy(frame).long() for frame in sample["roi_track_ids"]]
+            for sample in samples
+        ],
+        "roi_class_ids": [
+            [torch.from_numpy(frame).long() for frame in sample["roi_class_ids"]]
+            for sample in samples
+        ],
         "meta": [sample["meta"] for sample in samples],
     }

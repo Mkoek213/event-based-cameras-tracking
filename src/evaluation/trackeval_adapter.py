@@ -542,6 +542,8 @@ def summarise_trackeval_results(
         per_sequence[sequence] = {
             "metrics": {
                 "HOTA": float(np.mean(combined_hota["HOTA"])),
+                "AssA": float(np.mean(combined_hota["AssA"])),
+                "DetA": float(np.mean(combined_hota["DetA"])),
                 "MOTA": float(combined_clear["MOTA"]),
                 "IDF1": float(combined_identity["IDF1"]),
                 "IDS": int(combined_clear["IDSW"]),
@@ -551,6 +553,8 @@ def summarise_trackeval_results(
             "by_class": {
                 class_name: {
                     "HOTA": float(np.mean(sequence_results[class_name]["HOTA"]["HOTA"])),
+                    "AssA": float(np.mean(sequence_results[class_name]["HOTA"]["AssA"])),
+                    "DetA": float(np.mean(sequence_results[class_name]["HOTA"]["DetA"])),
                     "MOTA": float(sequence_results[class_name]["CLEAR"]["MOTA"]),
                     "IDF1": float(sequence_results[class_name]["Identity"]["IDF1"]),
                     "IDS": int(sequence_results[class_name]["CLEAR"]["IDSW"]),
@@ -565,6 +569,8 @@ def summarise_trackeval_results(
     combined = tracker_results["COMBINED_SEQ"]["cls_comb_det_av"]
     aggregate = {
         "HOTA": float(np.mean(combined["HOTA"]["HOTA"])),
+        "AssA": float(np.mean(combined["HOTA"]["AssA"])),
+        "DetA": float(np.mean(combined["HOTA"]["DetA"])),
         "MOTA": float(combined["CLEAR"]["MOTA"]),
         "IDF1": float(combined["Identity"]["IDF1"]),
         "IDS": int(combined["CLEAR"]["IDSW"]),
@@ -585,13 +591,15 @@ def write_summary_csv(summary: dict, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wt", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["sequence", "HOTA", "MOTA", "IDF1", "IDS", "FP", "FN"])
+        writer.writerow(["sequence", "HOTA", "AssA", "DetA", "MOTA", "IDF1", "IDS", "FP", "FN"])
         for sequence, sequence_summary in summary["per_sequence"].items():
             metrics = sequence_summary["metrics"]
             writer.writerow(
                 [
                     sequence,
                     f"{metrics['HOTA']:.6f}",
+                    f"{metrics['AssA']:.6f}",
+                    f"{metrics['DetA']:.6f}",
                     f"{metrics['MOTA']:.6f}",
                     f"{metrics['IDF1']:.6f}",
                     metrics["IDS"],
@@ -604,6 +612,8 @@ def write_summary_csv(summary: dict, output_path: Path) -> None:
             [
                 "COMBINED",
                 f"{aggregate['HOTA']:.6f}",
+                f"{aggregate['AssA']:.6f}",
+                f"{aggregate['DetA']:.6f}",
                 f"{aggregate['MOTA']:.6f}",
                 f"{aggregate['IDF1']:.6f}",
                 aggregate["IDS"],
