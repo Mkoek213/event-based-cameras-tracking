@@ -40,8 +40,10 @@ class RunSpec:
     def variant_label(self) -> str:
         return variant_label(self.representation, self.fusion_mode)
 
-    def checkpoint_name(self, width: int) -> str:
+    def checkpoint_name(self, width: int, architecture: str = "simple") -> str:
         name = f"{self.representation}_bins{self.num_bins}_w{width}"
+        if architecture != "simple":
+            name = f"{name}_{architecture}"
         return name if self.fusion_mode == "single" else f"{name}_{self.fusion_mode}"
 
 
@@ -78,6 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("data/datasets/dsec_mot"))
     parser.add_argument("--width", type=int, default=32)
+    parser.add_argument("--architecture", choices=("simple", "csp_pan"), default="simple")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -106,6 +109,7 @@ def main() -> int:
     python = sys.executable
     runner = CommandRunner(dry_run=args.dry_run)
     specs = build_specs(include_eros=not args.skip_eros, include_sweep=not args.skip_sweep)
+    arch_suffix = "" if args.architecture == "simple" else f"_{args.architecture}"
 
     if not args.skip_eros and not args.skip_train:
         code = runner.run(
@@ -125,7 +129,9 @@ def main() -> int:
 
     for spec in specs:
         sweep_output_dir = args.output_dir / sweep_label(spec.num_bins, spec.time_window_us)
-        checkpoint = sweep_output_dir / spec.checkpoint_name(args.width) / "best.pt"
+        checkpoint = (
+            sweep_output_dir / spec.checkpoint_name(args.width, args.architecture) / "best.pt"
+        )
         if not args.skip_train and (args.overwrite or not checkpoint.exists()):
             command = simple_detector_train_command(
                 python=python,
@@ -140,11 +146,12 @@ def main() -> int:
                 width=args.width,
                 device=args.device,
                 output_dir=sweep_output_dir,
+                architecture=args.architecture,
                 eros_cache_root=args.eros_cache_root,
                 class_ids=[0],
                 num_classes=1,
             )
-            code = runner.run(command, args.log_dir / f"train_{spec.label}.log")
+            code = runner.run(command, args.log_dir / f"train_{spec.label}{arch_suffix}.log")
             if code != 0:
                 return code
         elif not args.skip_train:
@@ -157,7 +164,9 @@ def main() -> int:
 
         for target in DEFAULT_EVAL_TARGETS:
             for threshold in args.thresholds:
-                eval_name = f"{spec.label}_{target.label}_thr{threshold_label(threshold)}"
+                eval_name = (
+                    f"{spec.label}{arch_suffix}_{target.label}_thr{threshold_label(threshold)}"
+                )
                 summary = args.results_root / eval_name / "metrics_summary.json"
                 if summary.exists() and not args.overwrite:
                     print(f"Skipping eval, summary exists: {summary}")

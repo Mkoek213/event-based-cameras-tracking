@@ -68,6 +68,8 @@ def train_command(
         str(args.num_workers),
         "--model-width",
         str(args.width),
+        "--architecture",
+        args.architecture,
         "--seed",
         str(seed),
         "--device",
@@ -82,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("data/datasets/dsec_mot"))
     parser.add_argument("--width", type=int, default=96)
+    parser.add_argument("--architecture", choices=("simple", "csp_pan"), default="simple")
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(
@@ -115,11 +118,12 @@ def main() -> int:
     args = parse_args()
     python = sys.executable
     runner = CommandRunner(dry_run=args.dry_run)
+    arch_suffix = "" if args.architecture == "simple" else f"_{args.architecture}"
 
     for seed in args.seeds:
         seed_output_dir = args.output_dir / f"w{args.width}_seed{seed}"
         for variant in VARIANTS:
-            run_name = variant.checkpoint_name(args.num_bins, args.width)
+            run_name = variant.checkpoint_name(args.num_bins, args.width, args.architecture)
             label = variant_label(variant.representation, variant.fusion_mode)
             checkpoint = seed_output_dir / run_name / "best.pt"
 
@@ -135,7 +139,7 @@ def main() -> int:
                             seed=seed,
                             output_dir=seed_output_dir,
                         ),
-                        args.log_dir / f"train_w{args.width}_seed{seed}_{label}.log",
+                        args.log_dir / f"train_w{args.width}_seed{seed}_{label}{arch_suffix}.log",
                     )
                     if code != 0:
                         return code
@@ -148,7 +152,7 @@ def main() -> int:
             for target in DEFAULT_EVAL_TARGETS:
                 for threshold in args.thresholds:
                     eval_run_name = (
-                        f"w{args.width}_seed{seed}_{label}_{target.label}_thr"
+                        f"w{args.width}_seed{seed}_{label}{arch_suffix}_{target.label}_thr"
                         f"{threshold_label(threshold)}"
                     )
                     summary_path = args.results_root / eval_run_name / "metrics_summary.json"
