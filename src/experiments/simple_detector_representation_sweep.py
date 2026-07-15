@@ -11,6 +11,7 @@ from src.experiments.common import (
     DEFAULT_EVAL_TARGETS,
     CommandRunner,
     VariantSpec,
+    checkpoint_has_completed_epochs,
     require_checkpoint,
     simple_detector_eval_command,
     simple_detector_train_command,
@@ -39,8 +40,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("data/datasets/dsec_mot"))
     parser.add_argument("--width", type=int, default=32)
+    parser.add_argument("--architecture", choices=("simple", "csp_pan"), default="simple")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--num-bins", type=int, nargs="+", default=[3, 5, 7, 10])
     parser.add_argument("--time-window-us", type=int, nargs="+", default=[25_000, 50_000, 100_000])
@@ -64,6 +67,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume incomplete training runs from last.pt instead of starting from scratch.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -72,6 +80,7 @@ def main() -> int:
     args = parse_args()
     python = sys.executable
     runner = CommandRunner(dry_run=args.dry_run)
+    arch_suffix = "" if args.architecture == "simple" else f"_{args.architecture}"
 
     for bins in args.num_bins:
         for window_us in args.time_window_us:
@@ -79,9 +88,12 @@ def main() -> int:
             sweep_output_dir = args.output_dir / sweep_name
             for variant in selected_variants(args.variants):
                 checkpoint = (
-                    sweep_output_dir / variant.checkpoint_name(bins, args.width) / "best.pt"
+                    sweep_output_dir
+                    / variant.checkpoint_name(bins, args.width, args.architecture)
+                    / "best.pt"
                 )
-                if not args.skip_train and (args.overwrite or not checkpoint.exists()):
+                training_complete = checkpoint_has_completed_epochs(checkpoint, args.epochs)
+                if not args.skip_train and (args.overwrite or not training_complete):
                     command = simple_detector_train_command(
                         python=python,
                         root=args.root,
@@ -93,16 +105,20 @@ def main() -> int:
                         batch_size=args.batch_size,
                         num_workers=args.num_workers,
                         width=args.width,
+                        grad_accum_steps=args.grad_accum_steps,
                         device=args.device,
+                        architecture=args.architecture,
                         output_dir=sweep_output_dir,
+                        resume=args.resume and not args.overwrite,
                     )
                     code = runner.run(
-                        command, args.log_dir / f"train_{sweep_name}_{variant.label}.log"
+                        command,
+                        args.log_dir / f"train_{sweep_name}_{variant.label}{arch_suffix}.log",
                     )
                     if code != 0:
                         return code
                 elif not args.skip_train:
-                    print(f"Skipping training, checkpoint exists: {checkpoint}")
+                    print(f"Skipping training, checkpoint complete: {checkpoint}")
 
                 if args.skip_eval:
                     continue
@@ -111,7 +127,7 @@ def main() -> int:
                 for target in DEFAULT_EVAL_TARGETS:
                     for threshold in args.thresholds:
                         eval_name = (
-                            f"{sweep_name}_{variant.label}_{target.label}_thr"
+                            f"{sweep_name}_{variant.label}{arch_suffix}_{target.label}_thr"
                             f"{threshold_label(threshold)}"
                         )
                         summary = args.results_root / eval_name / "metrics_summary.json"
