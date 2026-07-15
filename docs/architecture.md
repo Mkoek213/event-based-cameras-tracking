@@ -133,3 +133,19 @@ Local experiment outputs are intentionally not tracked by Git:
   `models/` and `notebooks/` are not part of the active workflow.
 
 The repository should track code, tests and small documentation only.
+
+## Event-ReID Association Benchmark
+
+The R0/R1/R2 association benchmark keeps the gated EF+VG detector path and adds
+an object-level descriptor branch only after the shared stride-8 backbone map.
+The branch projects to 128 channels, optionally applies a spatial ConvGRU for
+R2, pools final post-NMS boxes with aligned 7x7 RoIAlign, and emits one
+L2-normalised 256-dimensional descriptor per detection. No recurrence is added
+to the stems, gated fusion, backbone, neck, classification head, or box head.
+
+`src.training.recurrent_embedding_detector` trains descriptors with identity
+cross-entropy and same-class batch-hard cosine triplets and selects checkpoints
+by validation retrieval mAP. `src.experiments.event_reid_embedding_benchmark`
+orchestrates both all-class and car-only R0/R1/R2 protocols, including
+motion-only diagnostics and validation-only threshold selection. See
+`docs/event_reid_embedding_benchmark.md` for exact paths and commands.
