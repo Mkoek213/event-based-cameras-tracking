@@ -1,6 +1,7 @@
 """Loss, retrieval, and CPU smoke tests for object-level association training."""
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,8 +14,10 @@ from src.models.simple_detector import SimpleDenseDetector, SimpleDetectorConfig
 from src.training.recurrent_embedding_detector import (
     batch_hard_cosine_triplet_loss,
     class_aware_retrieval_metrics,
+    detach_recurrent_state,
     identity_loss,
     is_better_checkpoint,
+    load_compatible_embedding_head,
     run_clip_epoch,
 )
 
@@ -41,6 +44,8 @@ def make_clip_item(seed: int) -> dict:
         bbox[time_index, :, 5, 5] = 1.0
         pos_mask[time_index, 2, 2] = True
         pos_mask[time_index, 5, 5] = True
+        identity[time_index, 2, 2] = 0
+        identity[time_index, 5, 5] = 1
         roi_boxes.append(
             np.asarray(
                 [[4.0, 4.0, 28.0, 28.0], [36.0, 36.0, 60.0, 60.0]],
@@ -67,7 +72,7 @@ def make_clip_item(seed: int) -> dict:
     }
 
 
-def make_model(recurrent: bool) -> SimpleDenseDetector:
+def make_model(recurrent: bool, head_type: str = "roi") -> SimpleDenseDetector:
     return SimpleDenseDetector(
         SimpleDetectorConfig(
             in_channels=8,
@@ -76,6 +81,7 @@ def make_model(recurrent: bool) -> SimpleDenseDetector:
             component_channels=(2, 6),
             embedding_dim=16,
             embedding_hidden_dim=12,
+            embedding_head_type=head_type,
             embedding_roi_size=7,
             embedding_recurrent=recurrent,
         )
@@ -169,12 +175,17 @@ def test_checkpoint_ties_use_rank1_then_lower_detection_loss() -> None:
     )
 
 
-@pytest.mark.parametrize("recurrent", [False, True], ids=["R1", "R2"])
+@pytest.mark.parametrize(
+    "head_type,recurrent",
+    [("roi", False), ("roi", True), ("dense", False), ("dense", True)],
+    ids=["R1", "R2", "D1", "D2"],
+)
 def test_cpu_smoke_epoch_has_finite_losses_updates_weights_and_retrieves(
+    head_type: str,
     recurrent: bool,
 ) -> None:
     torch.manual_seed(0)
-    model = make_model(recurrent)
+    model = make_model(recurrent, head_type)
     classifier = nn.Linear(16, 2)
     loader = DataLoader(
         [make_clip_item(0)],
@@ -233,3 +244,268 @@ def test_cpu_smoke_epoch_has_finite_losses_updates_weights_and_retrieves(
     assert math.isfinite(float(validation["retrieval_map"]))
     assert math.isfinite(float(validation["retrieval_rank1"]))
     assert not torch.equal(before, model.embedding_head.weight.detach())
+
+
+def test_frozen_detector_weights_and_batch_norm_stats_do_not_change() -> None:
+    torch.manual_seed(3)
+    model = make_model(recurrent=False)
+    model.set_detector_trainable(False)
+    classifier = nn.Linear(16, 2)
+    loader = DataLoader(
+        [make_clip_item(1)],
+        batch_size=1,
+        collate_fn=collate_clip_batch,
+    )
+    optimizer = torch.optim.AdamW(
+        [
+            parameter
+            for parameter in list(model.parameters()) + list(classifier.parameters())
+            if parameter.requires_grad
+        ],
+        lr=1e-3,
+    )
+    detector_before = {
+        key: value.detach().clone()
+        for key, value in model.state_dict().items()
+        if not key.startswith("embedding_")
+    }
+    embedding_before = model.embedding_head.weight.detach().clone()
+
+    run_clip_epoch(
+        model=model,
+        classifier=classifier,
+        loader=loader,
+        device=torch.device("cpu"),
+        optimizer=optimizer,
+        use_amp=False,
+        background_weight=0.05,
+        bbox_weight=1.0,
+        identity_ce_weight=1.0,
+        triplet_weight=1.0,
+        triplet_margin=0.3,
+        grad_clip_norm=5.0,
+        grad_accum_steps=1,
+        log_every=0,
+        epoch=1,
+        phase="train",
+        component_splits=(2, 6),
+        compute_retrieval=False,
+    )
+
+    detector_after = model.state_dict()
+    assert all(torch.equal(value, detector_after[key]) for key, value in detector_before.items())
+    assert not torch.equal(embedding_before, model.embedding_head.weight.detach())
+
+
+@pytest.mark.parametrize("recurrent", [False, True], ids=["D1", "D2"])
+def test_initial_dense_head_load_does_not_replace_detector(
+    tmp_path: Path,
+    recurrent: bool,
+) -> None:
+    torch.manual_seed(7)
+    source = make_model(recurrent, "dense")
+    target = make_model(recurrent, "dense")
+    with torch.no_grad():
+        for name, parameter in source.named_parameters():
+            if name.startswith("embedding_"):
+                parameter.fill_(0.125)
+    checkpoint = tmp_path / "dense_head.pt"
+    torch.save({"model_state": source.state_dict()}, checkpoint)
+    detector_before = {
+        key: value.detach().clone()
+        for key, value in target.state_dict().items()
+        if not key.startswith("embedding_")
+    }
+
+    loaded, skipped = load_compatible_embedding_head(
+        target,
+        checkpoint,
+        torch.device("cpu"),
+    )
+
+    assert loaded > 0
+    assert skipped == 0
+    assert all(
+        torch.equal(value, target.state_dict()[key]) for key, value in detector_before.items()
+    )
+    assert torch.allclose(
+        target.embedding_head.weight,
+        torch.full_like(target.embedding_head.weight, 0.125),
+    )
+
+
+def test_temporal_convlstm_smoke_updates_only_adapter_and_embedding_head() -> None:
+    torch.manual_seed(19)
+    model = SimpleDenseDetector(
+        SimpleDetectorConfig(
+            in_channels=8,
+            width=8,
+            fusion_mode="gated_two_branch",
+            component_channels=(2, 6),
+            embedding_dim=16,
+            embedding_hidden_dim=12,
+            embedding_head_type="dense",
+            embedding_recurrent=False,
+            temporal_recurrence_locations=("neck",),
+            temporal_recurrence_type="convlstm",
+            temporal_recurrence_mode="residual",
+        )
+    )
+    model.set_detector_trainable(False)
+    model.set_temporal_trainable(True)
+    classifier = nn.Linear(16, 2)
+    loader = DataLoader(
+        [make_clip_item(4)],
+        batch_size=1,
+        collate_fn=collate_clip_batch,
+    )
+    optimizer = torch.optim.AdamW(
+        [
+            parameter
+            for parameter in list(model.parameters()) + list(classifier.parameters())
+            if parameter.requires_grad
+        ],
+        lr=1e-3,
+    )
+    base_before = {
+        key: value.detach().clone()
+        for key, value in model.state_dict().items()
+        if not key.startswith("embedding_") and not key.startswith("temporal_adapters.")
+    }
+    gain_before = model.temporal_adapters["neck"].residual_gain.detach().clone()
+
+    stats = run_clip_epoch(
+        model=model,
+        classifier=classifier,
+        loader=loader,
+        device=torch.device("cpu"),
+        optimizer=optimizer,
+        use_amp=False,
+        background_weight=0.05,
+        bbox_weight=1.0,
+        identity_ce_weight=1.0,
+        triplet_weight=1.0,
+        triplet_margin=0.3,
+        grad_clip_norm=5.0,
+        grad_accum_steps=1,
+        log_every=0,
+        epoch=1,
+        phase="train",
+        component_splits=(2, 6),
+        compute_retrieval=False,
+    )
+
+    assert math.isfinite(float(stats["total_loss"]))
+    assert all(torch.equal(value, model.state_dict()[key]) for key, value in base_before.items())
+    assert not torch.equal(
+        gain_before,
+        model.temporal_adapters["neck"].residual_gain.detach(),
+    )
+
+
+def make_detector_only_temporal_model() -> SimpleDenseDetector:
+    model = SimpleDenseDetector(
+        SimpleDetectorConfig(
+            in_channels=8,
+            width=8,
+            fusion_mode="gated_two_branch",
+            component_channels=(2, 6),
+            embedding_dim=0,
+            temporal_recurrence_locations=("neck",),
+            temporal_recurrence_type="convgru",
+            temporal_recurrence_mode="direct",
+        )
+    )
+    model.set_detector_trainable(False)
+    model.set_temporal_trainable(True)
+    return model
+
+
+def test_detach_recurrent_state_handles_lstm_tuple_and_location_dictionary() -> None:
+    tensor = torch.randn(1, 2, 3, 3, requires_grad=True)
+
+    detached = detach_recurrent_state({"neck": (tensor, tensor + 1.0)})
+
+    assert isinstance(detached, dict)
+    assert isinstance(detached["neck"], tuple)
+    assert all(not item.requires_grad for item in detached["neck"])
+
+
+def test_detector_only_recurrence_carries_detached_state_between_contiguous_clips() -> None:
+    first = make_clip_item(21)
+    second = make_clip_item(22)
+    second["meta"] = [
+        {"sequence": "seq", "frame_index": index + CLIP_LENGTH, "timestamp": index}
+        for index in range(CLIP_LENGTH)
+    ]
+    model = make_detector_only_temporal_model()
+    loader = DataLoader([first, second], batch_size=1, collate_fn=collate_clip_batch)
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad], lr=1e-3
+    )
+
+    stats = run_clip_epoch(
+        model=model,
+        classifier=None,
+        loader=loader,
+        device=torch.device("cpu"),
+        optimizer=optimizer,
+        use_amp=False,
+        background_weight=0.05,
+        bbox_weight=1.0,
+        identity_ce_weight=0.0,
+        triplet_weight=0.0,
+        triplet_margin=0.3,
+        grad_clip_norm=5.0,
+        grad_accum_steps=1,
+        log_every=0,
+        epoch=1,
+        phase="train",
+        component_splits=(2, 6),
+        compute_retrieval=False,
+        carry_state_between_clips=True,
+        burn_in_frames=1,
+    )
+
+    assert stats["state_resets"] == 1
+    assert stats["state_carries"] == 1
+    assert stats["supervised_frames"] == 5
+    assert stats["identity_loss"] == 0.0
+    assert stats["triplet_loss"] == 0.0
+    assert math.isfinite(float(stats["detection_loss"]))
+
+
+def test_reset_memory_applies_burn_in_to_every_clip() -> None:
+    model = make_detector_only_temporal_model()
+    loader = DataLoader(
+        [make_clip_item(31), make_clip_item(32)],
+        batch_size=1,
+        collate_fn=collate_clip_batch,
+    )
+    with torch.inference_mode():
+        stats = run_clip_epoch(
+            model=model,
+            classifier=None,
+            loader=loader,
+            device=torch.device("cpu"),
+            optimizer=None,
+            use_amp=False,
+            background_weight=0.05,
+            bbox_weight=1.0,
+            identity_ce_weight=0.0,
+            triplet_weight=0.0,
+            triplet_margin=0.3,
+            grad_clip_norm=0.0,
+            grad_accum_steps=1,
+            log_every=0,
+            epoch=1,
+            phase="val",
+            component_splits=(2, 6),
+            compute_retrieval=False,
+            carry_state_between_clips=False,
+            burn_in_frames=2,
+        )
+
+    assert stats["state_resets"] == 2
+    assert stats["state_carries"] == 0
+    assert stats["supervised_frames"] == 2
