@@ -5,10 +5,12 @@ import numpy as np
 import pytest
 
 from src.evaluation.mot_trackers import (
+    BoxMotTracker,
     ByteTrackStyleTracker,
     DetectionObservation,
     IoUTracker,
     TrackingConfig,
+    build_tracker,
     load_detections_by_frame,
     track_detections,
 )
@@ -197,3 +199,68 @@ def test_with_reid_requires_embeddings_in_export(tmp_path: Path) -> None:
             tmp_path / "tracks.txt",
             TrackingConfig(backend="boxmot_botsort", with_reid=True),
         )
+
+
+def test_with_reid_accepts_an_export_without_detections(tmp_path: Path) -> None:
+    detection_export = tmp_path / "detections.json"
+    detection_export.write_text(
+        json.dumps(
+            {
+                "frames": [{"frame_index": 0, "timestamp": 0}],
+                "detections": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "tracks.txt"
+
+    summary = track_detections(
+        detection_export,
+        output,
+        TrackingConfig(backend="boxmot_botsort", with_reid=True),
+    )
+
+    assert output.read_text(encoding="utf-8") == ""
+    assert summary["tracks_written"] == 0
+    assert summary["embedding_dim"] == 0
+    assert summary["with_reid"] is True
+
+
+def test_botsort_can_track_each_class_independently_without_dummy_cmc() -> None:
+    tracker = build_tracker(
+        TrackingConfig(
+            backend="boxmot_botsort",
+            with_reid=True,
+            per_class=True,
+            num_classes=7,
+            cmc_method=None,
+        )
+    )
+
+    assert isinstance(tracker, BoxMotTracker)
+    assert tracker._tracker.per_class is True
+    assert tracker._tracker.nr_classes == 7
+    assert tracker._tracker.cmc is None
+
+
+def test_botsort_per_class_external_reid_accepts_empty_first_frame() -> None:
+    tracker = build_tracker(
+        TrackingConfig(
+            backend="boxmot_botsort",
+            with_reid=True,
+            per_class=True,
+            num_classes=7,
+            cmc_method=None,
+        )
+    )
+
+    assert isinstance(tracker, BoxMotTracker)
+    records = tracker.update(
+        detections=[],
+        frame_index=0,
+        timestamp=0,
+        embeddings=np.empty((0, 16), dtype=np.float32),
+    )
+
+    assert records == []
+    assert tracker._tracker.last_emb_size == 16

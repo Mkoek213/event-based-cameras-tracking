@@ -35,6 +35,7 @@ from src.data.representations import (
 )
 from src.evaluation.detection_export import (
     DetectionRecord,
+    load_detection_export,
     load_event_file,
     load_image_timestamps,
     read_events,
@@ -50,12 +51,12 @@ from src.evaluation.trackeval_adapter import (
 )
 from src.models.simple_detector import (
     SimpleDenseDetector,
-    SimpleDetectorConfig,
     attach_detection_embeddings,
     decode_dense_detections,
     detection_boxes_xyxy,
     normalise_event_tensor,
     normalise_representation_tensor,
+    simple_detector_config_from_checkpoint,
 )
 
 DEFAULT_TEST_SEQUENCES = ["interlaken_00_d", "zurich_city_00_b"]
@@ -63,7 +64,7 @@ DEFAULT_TEST_SEQUENCES = ["interlaken_00_d", "zurich_city_00_b"]
 
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[SimpleDenseDetector, dict]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model_config = SimpleDetectorConfig(**checkpoint["model_config"])
+    model_config = simple_detector_config_from_checkpoint(checkpoint)
     model = SimpleDenseDetector(model_config).to(device)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -121,6 +122,8 @@ def export_simple_detector_detections_for_sequence(
         else ()
     )
     has_embedding_head = model.config.embedding_dim > 0
+    embedding_head_type = getattr(model.config, "embedding_head_type", "roi")
+    has_temporal_recurrence = bool(getattr(model.config, "temporal_recurrence_locations", ()))
 
     all_detections: list[DetectionRecord] = []
     frames_payload = [
@@ -130,6 +133,7 @@ def export_simple_detector_detections_for_sequence(
     handle, x, y, p, t, ms_to_idx, t_offset, _ = load_event_file(events_h5)
     started = time.perf_counter()
     embedding_state = None
+    temporal_state = None
     try:
         total = len(frame_entries)
         for position, (frame_index, timestamp_us) in enumerate(frame_entries, start=1):
@@ -155,8 +159,25 @@ def export_simple_detector_detections_for_sequence(
             else:
                 tensor = normalise_event_tensor(tensor)
             with torch.inference_mode():
-                outputs = model(tensor, embedding_state)
+                if has_temporal_recurrence:
+                    outputs = model(
+                        tensor,
+                        embedding_state=embedding_state,
+                        temporal_state=temporal_state,
+                    )
+                else:
+                    outputs = model(tensor, embedding_state)
                 embedding_state = outputs.get("embedding_state")
+                temporal_state = outputs.get("temporal_state")
+                dense_embeddings = (
+                    outputs.get("embeddings")
+                    if has_embedding_head and embedding_head_type == "dense"
+                    else None
+                )
+                if dense_embeddings is not None and not isinstance(dense_embeddings, torch.Tensor):
+                    raise RuntimeError(
+                        "Dense embedding checkpoint did not return an embedding map."
+                    )
                 detections = decode_dense_detections(
                     outputs=outputs,
                     frame_index=frame_index,
@@ -165,12 +186,13 @@ def export_simple_detector_detections_for_sequence(
                     nms_iou_threshold=nms_iou_threshold,
                     max_detections=max_detections,
                     feature_stride=model.config.feature_stride,
+                    embeddings=dense_embeddings,
                 )
-                if has_embedding_head:
+                if has_embedding_head and embedding_head_type == "roi":
                     feature_map = outputs.get("embedding_feature_map")
                     if not isinstance(feature_map, torch.Tensor):
                         raise RuntimeError(
-                            "Embedding checkpoint did not return embedding_feature_map."
+                            "RoI embedding checkpoint did not return embedding_feature_map."
                         )
                     boxes = detection_boxes_xyxy(detections, feature_map)
                     descriptors = model.extract_roi_embeddings(feature_map, [boxes])
@@ -200,7 +222,13 @@ def export_simple_detector_detections_for_sequence(
         "time_window_us": time_window_us,
         "input_normalisation": input_normalisation,
         "embedding_dim": model.config.embedding_dim,
+        "embedding_head_type": embedding_head_type,
         "embedding_recurrent": model.config.embedding_recurrent,
+        "temporal_recurrence_locations": list(
+            getattr(model.config, "temporal_recurrence_locations", ())
+        ),
+        "temporal_recurrence_type": getattr(model.config, "temporal_recurrence_type", "convgru"),
+        "temporal_recurrence_mode": getattr(model.config, "temporal_recurrence_mode", "residual"),
         "model_config": checkpoint["model_config"],
         "benchmark_config": checkpoint.get("benchmark_config", {}),
         "elapsed_s": elapsed_s,
@@ -210,6 +238,48 @@ def export_simple_detector_detections_for_sequence(
     }
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
+
+
+def reuse_cached_detection_export(
+    source_path: Path,
+    output_path: Path,
+    checkpoint_path: Path,
+    score_threshold: float,
+    nms_iou_threshold: float,
+    max_detections: int,
+) -> dict:
+    """Reuse an equivalent detector export without repeating model inference."""
+
+    payload = load_detection_export(source_path)
+    source_checkpoint_value = str(payload.get("checkpoint", ""))
+    source_checkpoint = Path(source_checkpoint_value)
+    if not source_checkpoint_value or source_checkpoint.resolve() != checkpoint_path.resolve():
+        raise ValueError(
+            f"Detection cache {source_path} belongs to {source_checkpoint}, not {checkpoint_path}."
+        )
+    source_threshold = float(payload.get("score_threshold", 1.0))
+    if abs(source_threshold - score_threshold) > 1e-12:
+        raise ValueError(
+            f"Detection cache threshold {source_threshold} does not match "
+            f"requested threshold {score_threshold}."
+        )
+    source_nms = float(payload.get("nms_iou_threshold", -1.0))
+    if abs(source_nms - nms_iou_threshold) > 1e-12:
+        raise ValueError(
+            f"Detection cache NMS threshold {source_nms} does not match "
+            f"requested {nms_iou_threshold}."
+        )
+    source_limit = int(payload.get("max_detections", 0))
+    if source_limit != max_detections:
+        raise ValueError(
+            f"Detection cache limit {source_limit} does not match requested {max_detections}."
+        )
+
+    reused = dict(payload)
+    reused["detection_cache_source"] = str(source_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(reused, indent=2), encoding="utf-8")
+    return reused
 
 
 def parse_args() -> argparse.Namespace:
@@ -254,6 +324,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--track-appearance-thresh", type=float, default=0.25)
     parser.add_argument("--track-proximity-thresh", type=float, default=0.5)
     parser.add_argument(
+        "--track-per-class",
+        action="store_true",
+        help="Run independent BoxMOT tracker state for every detector class.",
+    )
+    parser.add_argument(
+        "--track-disable-cmc",
+        action="store_true",
+        help="Disable camera-motion compensation when no real intensity image is supplied.",
+    )
+    parser.add_argument(
         "--input-normalisation",
         choices=("auto", "whole", "component"),
         default="auto",
@@ -274,6 +354,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=0)
+    parser.add_argument(
+        "--detection-cache-root",
+        type=Path,
+        default=None,
+        help=("Optional exact-score detection cache reused across tracker settings."),
+    )
     parser.add_argument("--tracker-name", default=None)
     parser.add_argument("--trackeval-root", type=Path, default=Path("external/TrackEval"))
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -336,26 +422,45 @@ def main() -> int:
     tracker_runs: dict[str, dict] = {}
     for sequence in sequences:
         detection_path = detections_dir / f"{sequence}.json"
-        print(f"Exporting detections for {sequence} -> {detection_path}")
-        detection_runs[sequence] = export_simple_detector_detections_for_sequence(
-            model=model,
-            checkpoint=checkpoint,
-            root=args.root,
-            split=args.split,
-            sequence=sequence,
-            output_path=detection_path,
-            score_threshold=args.score_threshold,
-            nms_iou_threshold=args.nms_iou_threshold,
-            max_detections=args.max_detections,
-            representation=representation,
-            num_bins=num_bins,
-            time_window_us=time_window_us,
-            device=device,
-            eros_store=eros_store,
-            start_frame=args.start_frame,
-            max_frames=args.max_frames,
-            input_normalisation=input_normalisation,
+        cache_path = (
+            args.detection_cache_root / f"{sequence}.json"
+            if args.detection_cache_root is not None
+            else None
         )
+        export_path = cache_path or detection_path
+        if cache_path is None or not cache_path.exists():
+            print(f"Exporting detections for {sequence} -> {export_path}")
+            export_simple_detector_detections_for_sequence(
+                model=model,
+                checkpoint=checkpoint,
+                root=args.root,
+                split=args.split,
+                sequence=sequence,
+                output_path=export_path,
+                score_threshold=args.score_threshold,
+                nms_iou_threshold=args.nms_iou_threshold,
+                max_detections=args.max_detections,
+                representation=representation,
+                num_bins=num_bins,
+                time_window_us=time_window_us,
+                device=device,
+                eros_store=eros_store,
+                start_frame=args.start_frame,
+                max_frames=args.max_frames,
+                input_normalisation=input_normalisation,
+            )
+        if cache_path is not None:
+            print(f"Reusing cached detections for {sequence} -> {detection_path}")
+            detection_runs[sequence] = reuse_cached_detection_export(
+                source_path=cache_path,
+                output_path=detection_path,
+                checkpoint_path=args.checkpoint,
+                score_threshold=args.score_threshold,
+                nms_iou_threshold=args.nms_iou_threshold,
+                max_detections=args.max_detections,
+            )
+        else:
+            detection_runs[sequence] = load_detection_export(detection_path)
 
         track_path = tracks_dir / f"{sequence}.txt"
         print(f"Tracking {sequence} -> {track_path}")
@@ -372,6 +477,9 @@ def main() -> int:
                 with_reid=args.track_with_reid,
                 appearance_thresh=args.track_appearance_thresh,
                 proximity_thresh=args.track_proximity_thresh,
+                per_class=args.track_per_class,
+                num_classes=model.config.num_classes,
+                cmc_method=None if args.track_disable_cmc else "ecc",
             ),
         )
 

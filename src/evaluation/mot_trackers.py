@@ -84,6 +84,9 @@ class TrackingConfig:
     with_reid: bool = False
     appearance_thresh: float = 0.25
     proximity_thresh: float = 0.5
+    per_class: bool = False
+    num_classes: int = 7
+    cmc_method: str | None = "ecc"
 
 
 @dataclass
@@ -371,6 +374,18 @@ class BoxMotTracker:
                     f"Embedding rows ({embeddings.shape[0]}) do not match "
                     f"detections ({dets.shape[0]}) at frame {frame_index}."
                 )
+            # BoxMOTs per-class splitter represents an empty class with
+            # ``embs=None`` until it has observed the embedding width once.
+            # If a sequence starts with an empty frame, BoT-SORT then falls
+            # back to its internal ReID model, which is intentionally absent
+            # when embeddings are supplied by our detector. Prime the known
+            # width from the external ``(0, D)`` array before that first split.
+            if (
+                getattr(self._tracker, "per_class", False)
+                and getattr(self._tracker, "last_emb_size", None) is None
+                and embeddings.ndim == 2
+            ):
+                self._tracker.last_emb_size = int(embeddings.shape[1])
             results = self._tracker.update(dets, self._dummy_image, embeddings)
         records: list[TrackedRecord] = []
         for row in np.asarray(results, dtype=np.float32):
@@ -432,20 +447,23 @@ def track_detections(
 
     config = config or TrackingConfig()
     frames = load_detections_by_frame(detection_export_path)
-    tracker = build_tracker(config)
+    has_detections = any(detections for _, _, detections in frames)
 
     embedding_dim = 0
     if config.with_reid:
         embedding_dim = _find_embedding_dim(frames)
-        if embedding_dim == 0:
+        if embedding_dim == 0 and has_detections:
             raise ValueError(
                 f"with_reid tracking requires embeddings in {detection_export_path}, "
                 "but no detection carries one. Export with an embedding-head checkpoint."
             )
+    tracker = None if config.with_reid and not has_detections else build_tracker(config)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tracked_records: list[TrackedRecord] = []
     for frame_index, timestamp, detections in frames:
+        if tracker is None:
+            continue
         if isinstance(tracker, BoxMotTracker):
             embeddings = _stack_frame_embeddings(detections, embedding_dim, config.with_reid)
             tracked_records.extend(tracker.update(detections, frame_index, timestamp, embeddings))
@@ -472,6 +490,9 @@ def track_detections(
         "with_reid": config.with_reid,
         "appearance_thresh": config.appearance_thresh,
         "proximity_thresh": config.proximity_thresh,
+        "per_class": config.per_class,
+        "num_classes": config.num_classes,
+        "cmc_method": config.cmc_method,
         "embedding_dim": embedding_dim,
     }
 
@@ -576,8 +597,11 @@ def _build_boxmot_tracker(backend: TrackerBackend, config: TrackingConfig):
                 match_thresh=config.iou_threshold,
                 proximity_thresh=config.proximity_thresh,
                 appearance_thresh=config.appearance_thresh,
+                cmc_method=config.cmc_method,
                 frame_rate=frame_rate,
                 with_reid=True,
+                per_class=config.per_class,
+                nr_classes=config.num_classes,
             )
         return BotSort(
             track_high_thresh=config.high_threshold,
@@ -585,8 +609,11 @@ def _build_boxmot_tracker(backend: TrackerBackend, config: TrackingConfig):
             new_track_thresh=config.high_threshold,
             track_buffer=config.max_missed_frames,
             match_thresh=config.iou_threshold,
+            cmc_method=config.cmc_method,
             frame_rate=frame_rate,
             with_reid=False,
+            per_class=config.per_class,
+            nr_classes=config.num_classes,
         )
     raise ValueError(f"Unsupported BoxMOT backend: {backend}")
 
