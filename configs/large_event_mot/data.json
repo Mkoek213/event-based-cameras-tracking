@@ -1,0 +1,168 @@
+{
+ "schema_version": 1,
+ "window_us": 50000,
+ "grid": {
+  "step_us": 50000,
+  "tolerance_us": 2000
+ },
+ "recording_overlap_allowed": {
+  "gen4_1mpx": "*",
+  "dsec_mot": [
+   "interlaken_00",
+   "zurich_city_01"
+  ]
+ },
+ "recording_overlap_reasons": {
+  "gen4_1mpx": "The 1Mpx release cuts every session into train, val, and test chunks about one minute apart; source validation is an optimistic monitor only.",
+  "dsec_mot": "Official DSEC-MOT split: interlaken_00_d is adjacent to training interlaken_00_c and interlaken_00_e; validation zurich_city_01_d shares its recording with training zurich_city_01_e."
+ },
+ "gen4_1mpx": {
+  "splits": [
+   "train",
+   "val"
+  ],
+  "expected_chunks": {
+   "train": 681,
+   "val": 128
+  },
+  "sensor": {
+   "width": 1280,
+   "height": 720
+  },
+  "polarity_map": {
+   "-1": 0,
+   "1": 1
+  },
+  "source_to_target": {
+   "0": 1,
+   "1": null,
+   "2": 0,
+   "3": 5,
+   "4": 4,
+   "5": null,
+   "6": null
+  },
+  "frame_spanning_fraction": 0.9,
+  "small_box": {
+   "min_diagonal_px": 60,
+   "min_side_px": 20
+  },
+  "min_window_events": 1000,
+  "zero_event_boxes_ignored": true,
+  "alignment_windows": 24,
+  "identity_reason": "Track IDs come from an automatic RGB tracker with documented swaps and fragmentation."
+ },
+ "dsec_mot": {
+  "splits": {
+   "train": [
+    "interlaken_00_a",
+    "interlaken_00_b",
+    "interlaken_00_c",
+    "interlaken_00_e",
+    "zurich_city_01_e",
+    "zurich_city_04_b",
+    "zurich_city_09_c",
+    "zurich_city_09_d",
+    "zurich_city_14_b"
+   ],
+   "val": [
+    "zurich_city_01_d"
+   ],
+   "test": [
+    "interlaken_00_d",
+    "zurich_city_00_b"
+   ]
+  },
+  "polarity_map": {
+   "0": 0,
+   "1": 1
+  },
+  "drop_boxes_outside_event_span": true,
+  "zero_event_boxes_ignored": false,
+  "min_rectified_area_px2": null,
+  "alignment_windows": 24,
+  "identity_supervision": true
+ },
+ "dsec_detection": {
+  "splits": {
+   "train": [
+    "interlaken_01_a",
+    "thun_00_a",
+    "thun_01_a",
+    "thun_02_a",
+    "zurich_city_02_a",
+    "zurich_city_02_b",
+    "zurich_city_02_c",
+    "zurich_city_02_d",
+    "zurich_city_02_e",
+    "zurich_city_03_a",
+    "zurich_city_04_a",
+    "zurich_city_04_c",
+    "zurich_city_04_d",
+    "zurich_city_04_e",
+    "zurich_city_04_f",
+    "zurich_city_05_a",
+    "zurich_city_05_b",
+    "zurich_city_07_a",
+    "zurich_city_08_a",
+    "zurich_city_09_a",
+    "zurich_city_09_b",
+    "zurich_city_09_e",
+    "zurich_city_10_a",
+    "zurich_city_10_b",
+    "zurich_city_11_a",
+    "zurich_city_11_b",
+    "zurich_city_11_c",
+    "zurich_city_12_a",
+    "zurich_city_13_a",
+    "zurich_city_13_b",
+    "zurich_city_14_a",
+    "zurich_city_14_c",
+    "zurich_city_15_a"
+   ],
+   "val_monitor": [
+    "zurich_city_16_a",
+    "zurich_city_17_a",
+    "zurich_city_18_a",
+    "zurich_city_20_a",
+    "zurich_city_21_a"
+   ]
+  },
+  "excluded_recordings": {
+   "interlaken_00": "Hosts DSEC-MOT test sequence interlaken_00_d.",
+   "zurich_city_00": "Hosts DSEC-MOT test sequence zurich_city_00_b.",
+   "zurich_city_01": "Hosts DSEC-MOT validation sequence zurich_city_01_d."
+  },
+  "excluded_sequences": {
+   "thun_01_b": "Box event density below the outside density.",
+   "zurich_city_06_a": "Box event density below the outside density.",
+   "zurich_city_19_a": "Box event density below the outside density."
+  },
+  "label_precedence": "dsec_mot",
+  "expected_label_sequences": 60,
+  "polarity_map": {
+   "0": 0,
+   "1": 1
+  },
+  "source_to_target": {
+   "0": 1,
+   "1": 1,
+   "2": 0,
+   "3": 4,
+   "4": 5,
+   "5": 2,
+   "6": 3,
+   "7": null
+  },
+  "masked_target_classes": [
+   6
+  ],
+  "boundary_samples_per_edge": 20,
+  "drop_boxes_outside_event_span": true,
+  "zero_event_boxes_ignored": true,
+  "min_rectified_area_px2": 614.4,
+  "alignment_windows": 24,
+  "identity_supervision": false,
+  "identity_reason": "Semi-automatic QDTrack identities; DSEC-MOT is the only identity source."
+ }
+}
