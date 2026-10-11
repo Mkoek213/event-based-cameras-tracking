@@ -48,6 +48,17 @@ DSEC_GEOM = lc.dataset_geometry(CONFIG, schema.DSEC_MOT)
 # --------------------------------------------------------------------------- synthetic sources
 
 
+def file_version(path):
+    """Identify one write of a file.
+
+    Outputs are replaced atomically, so a rewrite gets a new inode even when the file
+    system stores modification times in whole seconds (Lustre).
+    """
+
+    stat = Path(path).stat()
+    return stat.st_ino, stat.st_mtime_ns
+
+
 def write_gen4_chunk(root, stem, x, y, t, p, labels, split="train"):
     directory = Path(root) / split
     directory.mkdir(parents=True, exist_ok=True)
@@ -363,11 +374,11 @@ def test_gen4_chunk_label_masks_ignore_regions_and_resume(tmp_path):
     }
     assert record["alignment"]["aligned"] is True
     json_path = schema.sequence_paths(out, STEM)[0]
-    before = json_path.stat().st_mtime_ns
+    before = file_version(json_path)
     lp.convert_chunk(tmp_path, "train", STEM, gen4_settings(), out)
-    assert json_path.stat().st_mtime_ns == before
+    assert file_version(json_path) == before
     lp.convert_chunk(tmp_path, "train", STEM, gen4_settings(min_window_events=10), out)
-    assert json_path.stat().st_mtime_ns != before
+    assert file_version(json_path) != before
 
 
 def test_malformed_gen4_labels_rejected(tmp_path):
@@ -569,18 +580,18 @@ def test_dsec_mot_resume_reuses_and_reconverts_on_change(tmp_path):
     rows = [(1, 0, 40, 40, 60, 50, 0)]
     convert_dsec_mot(tmp_path, "zurich_city_04_b", images, rows)
     json_path, npz_path = schema.sequence_paths(tmp_path / "manifest/dsec_mot", "zurich_city_04_b")
-    before = json_path.stat().st_mtime_ns
+    before = file_version(json_path)
     convert_dsec_mot(tmp_path, "zurich_city_04_b", images, rows)
-    assert json_path.stat().st_mtime_ns == before
+    assert file_version(json_path) == before
     # A corrupt annotation file is reconverted instead of reused.
     npz_path.write_bytes(b"corrupt")
     convert_dsec_mot(tmp_path, "zurich_city_04_b", images, rows)
-    assert json_path.stat().st_mtime_ns != before
+    assert file_version(json_path) != before
     assert schema.read_annotations(npz_path)["box_track_id"].tolist() == [0]
     # Changed labels change the label hash and force a reconversion.
-    before = json_path.stat().st_mtime_ns
+    before = file_version(json_path)
     convert_dsec_mot(tmp_path, "zurich_city_04_b", images, [(2, 4, 40, 40, 60, 50, 0)])
-    assert json_path.stat().st_mtime_ns != before
+    assert file_version(json_path) != before
     assert schema.read_annotations(npz_path)["box_track_id"].tolist() == [4]
 
 
@@ -923,9 +934,9 @@ def test_cache_resume_stale_key_and_incomplete_file(gen4_source, tmp_path):
     roots = {"gen4_root": gen4_source["root"]}
     path = lc.cache_path(tmp_path, schema.GEN4_1MPX, STEM)
     lc.build_sequence_cache(record, arrays, roots, CONFIG, tmp_path)
-    before = path.stat().st_mtime_ns
+    before = file_version(path)
     assert lc.build_sequence_cache(record, arrays, roots, CONFIG, tmp_path)["reused"] is True
-    assert path.stat().st_mtime_ns == before
+    assert file_version(path) == before
     (path.parent / f".{path.name}.999.tmp").write_bytes(b"partial")
     with h5py.File(path, "r+") as handle:
         handle.attrs["complete"] = False
