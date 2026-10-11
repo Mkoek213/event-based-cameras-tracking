@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "dataset": "dsec_mot",
+  "classes": ["car", "pedestrian", "bicycle", "motorcycle", "bus", "truck", "train"],
+  "splits": {
+    "selection": "val",
+    "final": "test"
+  },
+  "export": {
+    "schema_version": 1,
+    "weights": "ema",
+    "precision": "fp32",
+    "score_floor": 0.05,
+    "nms_iou": 0.5,
+    "max_detections": 300,
+    "clip_steps": 8,
+    "embedding_dim": 128
+  },
+  "tracker": {
+    "backend": "boxmot_botsort",
+    "boxmot_version": "21.0.0",
+    "frame_rate": 20,
+    "per_class": true,
+    "isolated_classes": true,
+    "cmc_method": null,
+    "new_track_threshold": "high"
+  },
+  "trackeval": {
+    "commit": "12c8791b303e0a0b50f753af204249e622d0281a",
+    "iou_threshold": 0.5,
+    "aggregate": "COMBINED_SEQ cls_comb_det_av, mean over the 19 HOTA alpha thresholds",
+    "scale": "fraction"
+  },
+  "probe": {
+    "mode": "reid",
+    "params": {
+      "high": 0.6,
+      "low": 0.1,
+      "buffer": 30,
+      "match": 0.8,
+      "appearance": 0.25,
+      "proximity": 0.5,
+      "min_area": false
+    },
+    "score_thresholds": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    "tie_breaks": ["higher AssA", "higher IDF1", "lower score threshold"],
+    "retained_candidates": 3,
+    "candidate_tie_breaks": ["higher probe AssA", "higher probe IDF1", "later step"]
+  },
+  "search": {
+    "mode": "reid",
+    "seed": 20261010,
+    "trials_per_candidate": 6480,
+    "grids": {
+      "score": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.97, 0.99],
+      "high": [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.97, 0.99],
+      "low": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45],
+      "buffer": [2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120],
+      "match": [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
+      "appearance": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
+      "proximity": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
+      "min_area": [false, true]
+    },
+    "base": {
+      "score": 0.9,
+      "high": 0.6,
+      "low": 0.1,
+      "buffer": 2,
+      "match": 0.5,
+      "appearance": 0.25,
+      "proximity": 0.5,
+      "min_area": false
+    },
+    "min_area_px2": 614.4,
+    "refine_every": 4,
+    "elite": 5,
+    "diagnostic_motion": {
+      "enabled": true,
+      "trials": 6480,
+      "neutral": {"appearance": 0.25, "proximity": 0.5}
+    }
+  },
+  "selection": {
+    "metric": "seven-class validation HOTA",
+    "tie_breaks": ["higher AssA", "higher IDF1", "earlier fine-tuning step", "canonical parameter hash"]
+  },
+  "supplementary": {
+    "literature_classes": ["car", "pedestrian", "bus", "truck"],
+    "variants": {
+      "L1": "class-aware cls_comb_det_av over the literature classes",
+      "L2": "literature classes collapsed to one class"
+    }
+  }
+}
