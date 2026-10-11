@@ -1,6 +1,6 @@
 """Upstream access and EF/VG fusion modules for the large event MOT detector.
 
-Three pieces live here so that :mod:`src.models.large_event_detector` only assembles:
+The pieces live here so that :mod:`src.models.large_event_detector` only assembles:
 
 - :func:`import_rvt` loads the pinned RVT checkout (``RVT_ROOT``) without colliding with
   this project's top-level ``data``, ``models``, and ``utils`` packages. RVT's packages
@@ -20,6 +20,10 @@ Three pieces live here so that :mod:`src.models.large_event_detector` only assem
   7x7 stride-4 conv, LayerNorm, and one ConvNeXt block, joined per pixel and channel by
   ``Z = LN(g * F_EF + (1 - g) * F_VG)`` with ``g = sigmoid(Conv1x1([F_EF; F_VG]))``.
   :func:`adapt_rvt_stem` derives both stem convs from the pretrained 20-channel conv.
+- :class:`RecurrentState` is the explicit carried state of the four RVT stage LSTMs:
+  one fp32 ``(h, c)`` pair per stage with per-row reset, hold, detach, and serialization.
+- :class:`EmbeddingHead` gives one L2-normalized descriptor per YOLOX anchor:
+  ``E_l = L2(Conv1x1(CBS3x3(CBS3x3(CBS1x1(P_l)))))`` per PAFPN level.
 """
 
 from __future__ import annotations
@@ -36,9 +40,10 @@ import types
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 RVT_MODULE_PREFIX = "_rvt_upstream"
@@ -444,3 +449,204 @@ def adapt_rvt_stem(
     voxel_grid = torch.einsum("bt,cpt...->cpb...", mixing, per_bin)
     voxel_grid = voxel_grid.reshape(out_channels, polarities * voxel_bins, *kernel)
     return event_frame.to(weight.dtype), voxel_grid.to(weight.dtype)
+
+
+# --------------------------------------------------------------------------- recurrent state
+
+
+def _row_mask(mask: torch.Tensor, batch: int, like: torch.Tensor) -> torch.Tensor:
+    if mask.dtype != torch.bool or tuple(mask.shape) != (batch,):
+        raise ValueError(f"expected a ({batch},) bool mask, got {mask.dtype} {tuple(mask.shape)}")
+    return mask.to(like.device).view(batch, *([1] * (like.ndim - 1)))
+
+
+@dataclass(frozen=True)
+class RecurrentState:
+    """Carried ``(h, c)`` of the RVT stage LSTMs, one NCHW pair per stage, in fp32.
+
+    Rows are streams (batch entries). Every operation returns a new state, so a state
+    that is still part of an autograd graph is never modified in place.
+    """
+
+    stages: tuple[tuple[torch.Tensor, torch.Tensor], ...]
+
+    def __post_init__(self) -> None:
+        if not self.stages:
+            raise ValueError("a recurrent state needs at least one stage")
+        batch = self.stages[0][0].shape[0]
+        for index, (hidden, cell) in enumerate(self.stages, start=1):
+            if hidden.shape != cell.shape or hidden.ndim != 4 or hidden.shape[0] != batch:
+                raise ValueError(
+                    f"stage {index}: h {tuple(hidden.shape)} and c {tuple(cell.shape)} "
+                    f"are not matching (N={batch}, C, H, W) maps"
+                )
+            if hidden.dtype != torch.float32 or cell.dtype != torch.float32:
+                raise ValueError(f"stage {index}: state must be float32")
+
+    @classmethod
+    def zeros(
+        cls,
+        batch_size: int,
+        shapes: Sequence[tuple[int, int, int]],
+        device: torch.device | str | None = None,
+    ) -> RecurrentState:
+        """Zero state for ``batch_size`` streams; ``shapes`` are per-stage ``(C, H, W)``."""
+
+        return cls(
+            tuple(
+                (
+                    torch.zeros(batch_size, *shape, device=device),
+                    torch.zeros(batch_size, *shape, device=device),
+                )
+                for shape in shapes
+            )
+        )
+
+    @classmethod
+    def from_rvt(cls, states: Sequence[tuple[torch.Tensor, torch.Tensor]]) -> RecurrentState:
+        """From the backbone's per-stage ``(h_t, c_t)`` list, cast to fp32."""
+
+        return cls(tuple((hidden.float(), cell.float()) for hidden, cell in states))
+
+    def as_rvt(self) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """The ``prev_states`` list that ``RNNDetector.forward`` takes."""
+
+        return [(hidden, cell) for hidden, cell in self.stages]
+
+    @property
+    def batch_size(self) -> int:
+        return int(self.stages[0][0].shape[0])
+
+    @property
+    def device(self) -> torch.device:
+        return self.stages[0][0].device
+
+    def shapes(self) -> tuple[tuple[int, int, int], ...]:
+        """Per-stage ``(C, H, W)``."""
+
+        return tuple(tuple(hidden.shape[1:]) for hidden, _ in self.stages)
+
+    def floats_per_stream(self) -> int:
+        return sum(2 * hidden[0].numel() for hidden, _ in self.stages)
+
+    def _map(self, function: Callable[[torch.Tensor], torch.Tensor]) -> RecurrentState:
+        return RecurrentState(tuple((function(h), function(c)) for h, c in self.stages))
+
+    def detach(self) -> RecurrentState:
+        """Cut the graph (TBPTT segment boundary); values are unchanged."""
+
+        return self._map(torch.Tensor.detach)
+
+    def to(self, device: torch.device | str) -> RecurrentState:
+        return self._map(lambda tensor: tensor.to(device))
+
+    def reset(self, mask: torch.Tensor) -> RecurrentState:
+        """Zero the rows where ``mask`` (``(N,)`` bool) is true."""
+
+        return self._map(
+            lambda t: torch.where(_row_mask(mask, self.batch_size, t), torch.zeros_like(t), t)
+        )
+
+    def hold(self, previous: RecurrentState, mask: torch.Tensor) -> RecurrentState:
+        """Rows where ``mask`` is false keep ``previous`` (masked tail steps)."""
+
+        if previous.shapes() != self.shapes() or previous.batch_size != self.batch_size:
+            raise ValueError("held state has a different layout")
+        return RecurrentState(
+            tuple(
+                tuple(
+                    torch.where(_row_mask(mask, self.batch_size, new), new, old)
+                    for new, old in zip(new_pair, old_pair)
+                )
+                for new_pair, old_pair in zip(self.stages, previous.stages)
+            )
+        )
+
+    def rows(self, index: torch.Tensor | Sequence[int]) -> RecurrentState:
+        """Select streams by index (for a state bank)."""
+
+        index = torch.as_tensor(index, dtype=torch.long, device=self.device)
+        return self._map(lambda tensor: tensor.index_select(0, index))
+
+    @classmethod
+    def cat(cls, states: Sequence[RecurrentState]) -> RecurrentState:
+        """Concatenate the streams of states with equal per-stage shapes."""
+
+        if not states or any(state.shapes() != states[0].shapes() for state in states):
+            raise ValueError("cannot concatenate states with different layouts")
+        return cls(
+            tuple(
+                (
+                    torch.cat([state.stages[i][0] for state in states]),
+                    torch.cat([state.stages[i][1] for state in states]),
+                )
+                for i in range(len(states[0].stages))
+            )
+        )
+
+    def is_zero(self) -> torch.Tensor:
+        """``(N,)`` bool: rows whose every ``h`` and ``c`` entry is zero."""
+
+        zero = torch.ones(self.batch_size, dtype=torch.bool, device=self.device)
+        for hidden, cell in self.stages:
+            zero &= (hidden.flatten(1) == 0).all(dim=1) & (cell.flatten(1) == 0).all(dim=1)
+        return zero
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        """Detached tensors keyed ``stage<k>.h`` and ``stage<k>.c``."""
+
+        state = {}
+        for index, (hidden, cell) in enumerate(self.stages, start=1):
+            state[f"stage{index}.h"] = hidden.detach()
+            state[f"stage{index}.c"] = cell.detach()
+        return state
+
+    @classmethod
+    def from_state_dict(cls, state: Mapping[str, torch.Tensor]) -> RecurrentState:
+        count = len(state) // 2
+        expected = {f"stage{i}.{part}" for i in range(1, count + 1) for part in ("h", "c")}
+        if set(state) != expected:
+            raise ValueError(f"recurrent state keys {sorted(state)} are not {sorted(expected)}")
+        return cls(tuple((state[f"stage{i}.h"], state[f"stage{i}.c"]) for i in range(1, count + 1)))
+
+
+# --------------------------------------------------------------------------- embedding head
+
+
+class EmbeddingHead(nn.Module):
+    """Dense per-anchor descriptors on the YOLOX grid, one branch per PAFPN level.
+
+    ``base_conv`` is RVT's ``BaseConv`` (conv without bias, BatchNorm, activation). The
+    output is ``(N, A, dim)`` in fp32 with unit L2 norm, flattened level by level in
+    row-major order like the YOLOX head outputs, so anchor ``a`` of both is the same cell.
+    """
+
+    def __init__(
+        self,
+        in_channels: Sequence[int],
+        settings: Mapping[str, Any],
+        base_conv: Callable[..., nn.Module],
+    ) -> None:
+        super().__init__()
+        hidden = int(settings["hidden_dim"])
+        act = settings["act"]
+        self.dim = int(settings["dim"])
+        self.eps = float(settings["normalize_eps"])
+        self.levels = nn.ModuleList(
+            nn.Sequential(
+                base_conv(int(channels), hidden, 1, 1, act=act),
+                base_conv(hidden, hidden, 3, 1, act=act),
+                base_conv(hidden, hidden, 3, 1, act=act),
+                nn.Conv2d(hidden, self.dim, kernel_size=1),
+            )
+            for channels in in_channels
+        )
+
+    def forward(self, features: Sequence[torch.Tensor]) -> torch.Tensor:
+        if len(features) != len(self.levels):
+            raise ValueError(f"expected {len(self.levels)} feature levels, got {len(features)}")
+        outputs = [
+            branch(feature).float().flatten(start_dim=2)
+            for branch, feature in zip(self.levels, features)
+        ]
+        return F.normalize(torch.cat(outputs, dim=2).permute(0, 2, 1), dim=-1, eps=self.eps)
