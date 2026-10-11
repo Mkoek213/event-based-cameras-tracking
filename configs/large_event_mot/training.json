@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "losses": {
+    "detection": {
+      "iou_loss_type": "iou",
+      "iou_weight": 5.0,
+      "masked_class_logit": -10000.0
+    },
+    "identity": {
+      "classifier": {"scale": 16.0, "init_std": 0.01},
+      "triplet": {"margin": 0.3},
+      "ce_weight": 1.0,
+      "triplet_weight": 1.0
+    }
+  },
+  "stages": {
+    "pretrain": {
+      "head": "source",
+      "identity": {"enabled": false, "datasets": []}
+    },
+    "finetune": {
+      "head": "target",
+      "identity": {"enabled": true, "datasets": ["dsec_mot"]}
+    }
+  }
+}
