@@ -744,7 +744,13 @@ def test_preflight_and_training_step_signal_policy(exp):
 def test_sbatch_wrapper(tmp_path):
     script = str(lem.SBATCH_SCRIPT)
     assert subprocess.run(["bash", "-n", script]).returncode == 0
-    env = {key: value for key, value in os.environ.items() if not key.startswith("SLURM")}
+    # Cluster shells define the real `module` through BASH_ENV or exported functions,
+    # which would replace the stubs below.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("SLURM", "BASH_FUNC_")) and key != "BASH_ENV"
+    }
     result = subprocess.run(["bash", script, "a", "b"], env=env, capture_output=True, text=True)
     assert result.returncode == 2 and "outside a Slurm job" in result.stderr
     env["SLURM_JOB_ID"] = "1"
