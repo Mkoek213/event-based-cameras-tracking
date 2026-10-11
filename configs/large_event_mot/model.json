@@ -93,6 +93,20 @@
       "num_classes": 7
     }
   },
+  "recurrence": {
+    "placement": "rvt_stage_lstm",
+    "stages": [1, 2, 3, 4],
+    "state_dtype": "float32"
+  },
+  "embedding": {
+    "in_stages": [2, 3, 4],
+    "hidden_dim": 256,
+    "dim": 128,
+    "act": "silu",
+    "normalize_eps": 1e-12,
+    "identity_classifier": {"identities": 320, "bias": false}
+  },
+  "parameter_interval": {"min": 20000000, "max": 90000000},
   "geometry": {
     "gen4_1mpx": {"input_hw": [384, 640], "valid_hw": [360, 640], "partition_size": [6, 10]},
     "dsec_mot": {"input_hw": [480, 640], "valid_hw": [480, 640], "partition_size": [5, 10]},
