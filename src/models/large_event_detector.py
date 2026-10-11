@@ -1,4 +1,4 @@
-"""RVT-B detector with separate Event Frame / Voxel Grid branches and gated fusion.
+"""RVT-B detector with separate EF / VG branches, gated fusion, and object embeddings.
 
 Architecture (``configs/large_event_mot/model.json``)::
 
@@ -6,6 +6,7 @@ Architecture (``configs/large_event_mot/model.json``)::
                          gated fusion, stride 4, 64 ch  (replaces RVT stages[0].downsample_cf2cl)
     VG (6 ch) --branch--/  -> RVT-B stages 1-4 (MaxViT + LSTM) -> RVT PAFPN (P3, P4, P5)
                            -> YOLOX head with 7 class rows
+                           -> embedding head (128-d unit descriptor per YOLOX anchor)
 
 The pinned RVT checkout supplies the backbone, PAFPN, and YOLOX head modules, so their
 parameter names (``backbone.*``, ``fpn.*``, ``yolox_head.*``) match the RVT checkpoint.
@@ -14,8 +15,16 @@ in the upstream training layout (decoded ``cx, cy, w, h`` in pixels, objectness 
 class logits) together with the anchor grid, so losses can reuse upstream SimOTA and
 decoding never depends on the head's cached grids.
 
-State: every call runs the RVT stage LSTMs from a zero state (single-step mode). Carried
-recurrent state and the embedding head are not part of this module yet.
+Recurrence: the four RVT stage LSTMs are the model's temporal memory (the stage 2-4
+hidden states are the PAFPN inputs). :meth:`LargeEventDetector.forward` takes and returns
+an explicit :class:`RecurrentState` (fp32 ``(h, c)`` per stage and stream); ``state=None``
+is a zero state, ``reset`` zeroes rows before the step, and rows with ``valid=False``
+return their input state unchanged (masked tail steps). The caller owns detaching and
+storing states; validation and inference start every sequence from a zero state.
+
+Embeddings: one L2-normalized descriptor per anchor in the YOLOX output order. Decoding
+carries the anchor index through score floor, NMS, and cap, so ``Detections.embeddings``
+rows are aligned with ``Detections.boxes`` by construction.
 
 Heads: ``source`` keeps the seven 1Mpx rows (pedestrian, two-wheeler, car, truck, bus,
 traffic sign, traffic light); ``target`` has the seven DSEC-MOT rows. Initialization:
@@ -25,7 +34,8 @@ traffic sign, traffic light); ``target`` has the seven DSEC-MOT rows. Initializa
   class rows are copied by name; the rest is new (gate at zero, so ``g = 0.5``).
 - ``random``: seeded fresh initialization; nothing is read or downloaded.
 - :func:`transfer_source_to_target`: a target model from a source state dict, with class
-  rows copied by the configured mapping and ``train`` new.
+  rows copied by the configured mapping and ``train`` new; the embedding head starts new
+  because pretraining has no identity supervision.
 
 Each initialization records loaded, adapted, new, and dropped tensors in
 ``model.metadata["transfer"]``.
@@ -53,8 +63,10 @@ from torch import nn
 from torchvision.ops import batched_nms
 
 from src.models.large_event_modules import (
+    EmbeddingHead,
     FusionOutput,
     GatedFusionStem,
+    RecurrentState,
     RvtCheckpoint,
     RvtUpstream,
     UpstreamError,
@@ -69,6 +81,7 @@ INITIALIZATIONS = ("rvt_checkpoint", "random")
 FUSION_PREFIX = "backbone.stages.0.downsample_cf2cl."
 RVT_STEM_CONV = FUSION_PREFIX + "conv.weight"
 CLASS_PREDS_PREFIX = "yolox_head.cls_preds."
+EMBEDDING_PREFIX = "embedding_head."
 PARAMETER_GROUPS = (
     ("event_frame_branch", FUSION_PREFIX + "event_frame."),
     ("voxel_grid_branch", FUSION_PREFIX + "voxel_grid."),
@@ -76,6 +89,7 @@ PARAMETER_GROUPS = (
     ("backbone", "backbone."),
     ("fpn", "fpn."),
     ("head", "yolox_head."),
+    ("embedding_head", EMBEDDING_PREFIX),
 )
 
 
@@ -198,12 +212,18 @@ class HeadOutput:
 
 @dataclass
 class DetectorOutput:
-    """One step of the detector: stage features, PAFPN levels, head, and fusion."""
+    """One step: stage features, PAFPN levels, head, embeddings, fusion, and new state.
+
+    ``embeddings`` is ``(N, A, D)`` fp32 with unit rows in the ``head`` anchor order, or
+    ``None`` when the step ran without the embedding head.
+    """
 
     backbone_features: dict[int, torch.Tensor]
     fpn_features: tuple[torch.Tensor, ...]
     head: HeadOutput
     fusion: FusionOutput
+    state: RecurrentState
+    embeddings: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -215,6 +235,7 @@ class Detections:
     labels: torch.Tensor  # (D,) head rows
     anchors: torch.Tensor  # (D,) anchor index into the HeadOutput order
     cap_reached: bool
+    embeddings: Optional[torch.Tensor] = None  # (D, E) rows aligned with boxes
 
 
 def decode_detections(
@@ -223,12 +244,21 @@ def decode_detections(
     score_floor: float,
     nms_iou: float,
     max_detections: int,
+    embeddings: Optional[torch.Tensor] = None,
 ) -> list[Detections]:
     """Score floor, clip to the valid region, class-aware NMS, then a score-ordered cap.
 
     Boxes with no area left after clipping (for example inside 1Mpx padding rows) are
     dropped. A higher score threshold on the result equals decoding at that threshold.
+    With ``embeddings`` (``(N, A, E)``), each detection gets the descriptor of the anchor
+    that produced it; an image without detections gets a ``(0, E)`` tensor.
     """
+
+    if embeddings is not None and embeddings.shape[:2] != head.boxes.shape[:2]:
+        raise ValueError(
+            f"embeddings {tuple(embeddings.shape)} do not match {tuple(head.boxes.shape[:2])} "
+            "anchors"
+        )
 
     height, width = valid_hw
     with torch.no_grad():
@@ -254,6 +284,7 @@ def decode_detections(
                     labels=labels[image, anchors],
                     anchors=anchors,
                     cap_reached=bool(cap_reached),
+                    embeddings=None if embeddings is None else embeddings[image, anchors],
                 )
             )
     return results
@@ -269,7 +300,7 @@ def _dict_config(value: Mapping[str, Any]) -> Any:
 
 
 class LargeEventDetector(nn.Module):
-    """RVT-B with the gated EF/VG stem and a seven-row YOLOX head."""
+    """RVT-B with the gated EF/VG stem, a seven-row YOLOX head, and the embedding head."""
 
     def __init__(
         self,
@@ -290,6 +321,16 @@ class LargeEventDetector(nn.Module):
         classes = tuple(config["heads"][ontology]["classes"])
         if len(classes) != rvt["head"]["num_classes"]:
             raise ModelConfigError(f"{ontology} head has {len(classes)} classes, RVT head differs")
+        recurrence = config["recurrence"]
+        num_stages = len(rvt["backbone"]["num_blocks"])
+        if (
+            recurrence["placement"] != "rvt_stage_lstm"
+            or list(recurrence["stages"]) != list(range(1, num_stages + 1))
+            or recurrence["state_dtype"] != "float32"
+        ):
+            raise ModelConfigError(f"unsupported recurrence settings {recurrence}")
+        if list(config["embedding"]["in_stages"]) != list(rvt["fpn"]["in_stages"]):
+            raise ModelConfigError("the embedding head must read the PAFPN levels of the head")
 
         self.config = copy.deepcopy(dict(config))
         self.ontology = ontology
@@ -312,9 +353,14 @@ class LargeEventDetector(nn.Module):
             in_channels=in_channels,
             strides=self.backbone.get_strides(in_stages),
         )
+        self.embedding_head = EmbeddingHead(
+            in_channels,
+            config["embedding"],
+            upstream.module("models.detection.yolox.models.network_blocks").BaseConv,
+        )
         self._attention_type = upstream.module("models.layers.maxvit.maxvit").PartitionAttentionCl
         self.metadata: dict[str, Any] = {
-            "architecture": "RVT-B with gated EF/VG stem and YOLOX head",
+            "architecture": "RVT-B with gated EF/VG stem, YOLOX head, and embedding head",
             "upstream": {
                 "repository": config["upstream"]["repository"],
                 "commit": upstream.commit,
@@ -323,7 +369,8 @@ class LargeEventDetector(nn.Module):
             "config_sha256": config_sha256(config),
             "ontology": ontology,
             "classes": list(classes),
-            "recurrence": "RVT stage LSTMs, zero state per call",
+            "recurrence": "RVT stage LSTMs (1x1 gates), carried fp32 (h, c) per stage",
+            "embedding_dim": self.embedding_head.dim,
         }
 
     @property
@@ -341,8 +388,40 @@ class LargeEventDetector(nn.Module):
         self.yolox_head.output_strides = None
         self.yolox_head.grids = [torch.zeros(1)] * len(self.yolox_head.grids)
 
-    def forward(self, event_frame: torch.Tensor, voxel_grid: torch.Tensor) -> DetectorOutput:
-        """One step on normalized ``(N, 2, H, W)`` EF and ``(N, 6, H, W)`` VG inputs."""
+    def state_shapes(self, geometry: Optional[str] = None) -> tuple[tuple[int, int, int], ...]:
+        """Per-stage LSTM state ``(C, H, W)`` for ``geometry`` (default: the current one)."""
+
+        selected = self.geometry if geometry is None else model_geometry(self.config, geometry)
+        height, width = selected.input_hw
+        return tuple(
+            (int(dim), height // int(stride), width // int(stride))
+            for dim, stride in zip(self.backbone.stage_dims, self.backbone.strides)
+        )
+
+    def initial_state(
+        self, batch_size: int, device: torch.device | str | None = None
+    ) -> RecurrentState:
+        """Zero fp32 state for ``batch_size`` streams (start of every sequence)."""
+
+        return RecurrentState.zeros(batch_size, self.state_shapes(), device=device)
+
+    def forward(
+        self,
+        event_frame: torch.Tensor,
+        voxel_grid: torch.Tensor,
+        state: Optional[RecurrentState] = None,
+        reset: Optional[torch.Tensor] = None,
+        valid: Optional[torch.Tensor] = None,
+        with_embeddings: bool = True,
+    ) -> DetectorOutput:
+        """One step on normalized ``(N, 2, H, W)`` EF and ``(N, 6, H, W)`` VG inputs.
+
+        ``state`` is the state before this step (``None``: zero). ``reset`` (``(N,)``
+        bool) zeroes rows before the step. Rows with ``valid`` false return their
+        (reset) input state, so masked padding steps do not advance the memory; their
+        outputs are computed but carry no meaning. Gradients flow through ``state``;
+        detaching at a truncation boundary is the caller's decision.
+        """
 
         for name, tensor in (("event_frame", event_frame), ("voxel_grid", voxel_grid)):
             if tuple(tensor.shape[-2:]) != self.geometry.input_hw:
@@ -350,7 +429,20 @@ class LargeEventDetector(nn.Module):
                     f"{name} is {tuple(tensor.shape[-2:])}, geometry {self.geometry.name} "
                     f"expects {self.geometry.input_hw}"
                 )
-        features, _ = self.backbone((event_frame, voxel_grid), None)
+        batch = event_frame.shape[0]
+        if state is None:
+            state = self.initial_state(batch, device=event_frame.device)
+        elif state.batch_size != batch or state.shapes() != self.state_shapes():
+            raise ValueError(
+                f"state for {state.batch_size} streams of {state.shapes()} does not match "
+                f"{batch} inputs of geometry {self.geometry.name} {self.state_shapes()}"
+            )
+        if reset is not None:
+            state = state.reset(reset)
+        features, rvt_states = self.backbone((event_frame, voxel_grid), state.as_rvt())
+        new_state = RecurrentState.from_rvt(rvt_states)
+        if valid is not None:
+            new_state = new_state.hold(state, valid)
         fusion = self.fusion.last_output
         self.fusion.last_output = None
         fpn_features = tuple(self.fpn(features))
@@ -359,6 +451,8 @@ class LargeEventDetector(nn.Module):
             fpn_features=fpn_features,
             head=self._head(fpn_features),
             fusion=fusion,
+            state=new_state,
+            embeddings=self.embedding_head(fpn_features) if with_embeddings else None,
         )
 
     def _head(self, features: Sequence[torch.Tensor]) -> HeadOutput:
@@ -415,6 +509,7 @@ class LargeEventDetector(nn.Module):
             settings["score_floor"] if score_floor is None else score_floor,
             settings["nms_iou"] if nms_iou is None else nms_iou,
             settings["max_detections"] if max_detections is None else max_detections,
+            embeddings=output.embeddings,
         )
 
 
@@ -439,6 +534,40 @@ def parameter_counts(model: nn.Module) -> dict[str, Any]:
         groups[group] += count
     buffers = sum(buffer.numel() for buffer in model.buffers())
     return {"total": total, "trainable": trainable, "groups": groups, "buffers": buffers}
+
+
+def model_accounting(model: LargeEventDetector) -> dict[str, Any]:
+    """Inference parameters with the 20-90M check, training-only parameters, state sizes.
+
+    Raises :class:`ModelConfigError` when the complete inference model is outside the
+    configured interval.
+    """
+
+    counts = parameter_counts(model)
+    interval = model.config["parameter_interval"]
+    if not interval["min"] <= counts["total"] <= interval["max"]:
+        raise ModelConfigError(
+            f"{counts['total']} inference parameters are outside "
+            f"[{interval['min']}, {interval['max']}]"
+        )
+    classifier = model.config["embedding"]["identity_classifier"]
+    identities = int(classifier["identities"])
+    classifier_parameters = identities * model.embedding_head.dim
+    classifier_parameters += identities if classifier["bias"] else 0
+    state = {}
+    for name in model.config["geometry"]:
+        shapes = model.state_shapes(name)
+        floats = sum(2 * c * h * w for c, h, w in shapes)
+        state[name] = {
+            "shapes": [list(shape) for shape in shapes],
+            "floats_per_stream": floats,
+            "bytes_per_stream": 4 * floats,
+        }
+    return {
+        "parameters": {**counts, "interval": [interval["min"], interval["max"]]},
+        "training_only": {"identity_classifier": classifier_parameters},
+        "recurrent_state": state,
+    }
 
 
 # --------------------------------------------------------------------------- initialization
@@ -616,7 +745,7 @@ def build_large_event_detector(
         }
     model.metadata["init"] = init
     model.metadata["transfer"] = report.as_dict()
-    model.metadata["parameters"] = parameter_counts(model)
+    model.metadata.update(model_accounting(model))
     return model
 
 
@@ -630,9 +759,11 @@ def transfer_source_to_target(
 ) -> LargeEventDetector:
     """Seven-class target model from a source-head state dict (fine-tuning start).
 
-    Every tensor except the class rows is copied; target rows follow
-    ``heads.target.from_source`` (``train`` and other unmapped rows stay new). Source
-    rows without a target row (traffic sign and light) are dropped.
+    Every tensor except the class rows and the embedding head is copied; target rows
+    follow ``heads.target.from_source`` (``train`` and other unmapped rows stay new).
+    Source rows without a target row (traffic sign and light) are dropped. The embedding
+    head starts new (seeded): pretraining has no identity supervision, and running it
+    in training mode would only have moved its BatchNorm statistics.
     """
 
     upstream = import_rvt(resolve_rvt_root(config, rvt_root), config["upstream"]["commit"])
@@ -651,6 +782,9 @@ def transfer_source_to_target(
     for key, tensor in source_state.items():
         if key in used:
             continue
+        if key.startswith(EMBEDDING_PREFIX):
+            report.dropped[key] = "embedding head starts new at fine-tuning"
+            continue
         if key not in state:
             report.dropped[key] = "not in the target model"
             continue
@@ -664,7 +798,7 @@ def transfer_source_to_target(
     model.metadata["init"] = "source_transfer"
     model.metadata["checkpoint"] = None
     model.metadata["transfer"] = report.as_dict()
-    model.metadata["parameters"] = parameter_counts(model)
+    model.metadata.update(model_accounting(model))
     return model
 
 
@@ -679,7 +813,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--init", choices=INITIALIZATIONS, default="rvt_checkpoint")
     parser.add_argument("--ontology", choices=ONTOLOGIES, default="source")
     parser.add_argument("--geometry", default="gen4_1mpx")
-    parser.add_argument("--smoke-forward", action="store_true", help="one zero-input CPU step")
+    parser.add_argument(
+        "--smoke-forward", action="store_true", help="two zero-input CPU steps with carried state"
+    )
     parser.add_argument("--report", default=None, help="write metadata JSON to this path")
     args = parser.parse_args(argv)
 
@@ -694,21 +830,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     summary = {
         key: model.metadata[key]
-        for key in ("upstream", "ontology", "init", "checkpoint", "parameters")
+        for key in (
+            "upstream",
+            "ontology",
+            "init",
+            "checkpoint",
+            "parameters",
+            "training_only",
+            "recurrent_state",
+        )
     }
     summary["transfer_counts"] = model.metadata["transfer"]["counts"]
     if args.smoke_forward:
         model.eval()
         fusion = config["fusion"]
         height, width = model.geometry.input_hw
+        inputs = (
+            torch.zeros(1, fusion["event_frame_channels"], height, width),
+            torch.zeros(1, fusion["voxel_grid_channels"], height, width),
+        )
         with torch.no_grad():
-            output = model(
-                torch.zeros(1, fusion["event_frame_channels"], height, width),
-                torch.zeros(1, fusion["voxel_grid_channels"], height, width),
-            )
+            output = model(*inputs)
+            output = model(*inputs, state=output.state)
         summary["smoke_forward"] = {
             "anchors": int(output.head.boxes.shape[1]),
             "fpn_shapes": [list(feature.shape) for feature in output.fpn_features],
+            "embedding_shape": list(output.embeddings.shape),
+            "state_floats": output.state.floats_per_stream(),
             "gate_mean": float(output.fusion.gate.mean()),
         }
     if args.report:
