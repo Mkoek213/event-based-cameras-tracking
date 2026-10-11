@@ -1,0 +1,33 @@
+# Large event-based MOT pipeline: pinned dependencies for two environments.
+#
+# GH200 (aarch64, plgrid-gpu-gh200): training, source validation, detection
+# export. Build inside a GH200 job after `module add ML-bundle/25.10`, which
+# provides the Helios wheel index in $PIP_EXTRA_INDEX_URL:
+#   pip install --no-cache-dir -r requirements/large_event_mot.txt
+#
+# x86_64 CPU (plgrid): BoT-SORT and TrackEval. Install on top of the project
+# requirements:
+#   pip install --no-cache-dir -r requirements.txt -r requirements/large_event_mot.txt
+#
+# Not installed by pip (see docs/large_event_mot.md):
+#   RVT  https://github.com/uzh-rpg/RVT  commit b80f5683a6e2d5de65d4bde8105d796ccb50dbb1 (MIT),
+#        a plain git checkout passed at runtime as RVT_ROOT.
+#   RVT-B 1Mpx checkpoint https://download.ifi.uzh.ch/rpg/RVT/checkpoints/1mpx/rvt-b.ckpt,
+#        297169732 bytes, SHA-256 65d83e68236e99290757c1305e06da6c0cc650c435eed03cea70e9ffed8a1572.
+
+# --- GH200 (aarch64) ---
+# PyTorch builds from the Helios wheel index (CUDA 12.9, BSD-3-Clause).
+torch==2.9.0+cu129; platform_machine == "aarch64"
+torchvision==0.24.0+cu129; platform_machine == "aarch64"
+# RVT runtime dependencies for the used modules.
+omegaconf==2.3.0; platform_machine == "aarch64"
+einops==0.8.1; platform_machine == "aarch64"
+numpy==2.2.6; platform_machine == "aarch64"
+# Event data and source-validation mAP.
+h5py==3.16.0; platform_machine == "aarch64"
+hdf5plugin==7.1.0; platform_machine == "aarch64"
+pycocotools==2.0.10; platform_machine == "aarch64"
+
+# --- x86_64 CPU (tracking and evaluation) ---
+boxmot==21.0.0; platform_machine == "x86_64"
+trackeval @ git+https://github.com/JonathonLuiten/TrackEval.git@12c8791b303e0a0b50f753af204249e622d0281a ; platform_machine == "x86_64"
