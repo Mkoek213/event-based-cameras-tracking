@@ -164,5 +164,115 @@
   "alignment_windows": 24,
   "identity_supervision": false,
   "identity_reason": "Semi-automatic QDTrack identities; DSEC-MOT is the only identity source."
+ },
+ "representation": {
+  "version": 1,
+  "event_frame_channels": 2,
+  "voxel_bins": 3,
+  "count_clip": 255,
+  "normalization": "log1p(count / pooled_sensor_pixels) / log1p(count_clip)"
+ },
+ "geometry": {
+  "gen4_1mpx": {
+   "pool": 2,
+   "frame": {
+    "width": 640,
+    "height": 360
+   },
+   "input": {
+    "width": 640,
+    "height": 384
+   }
+  },
+  "dsec_mot": {
+   "pool": 1,
+   "frame": {
+    "width": 640,
+    "height": 480
+   },
+   "input": {
+    "width": 640,
+    "height": 480
+   }
+  },
+  "dsec_detection": {
+   "pool": 1,
+   "frame": {
+    "width": 640,
+    "height": 480
+   },
+   "input": {
+    "width": 640,
+    "height": 480
+   }
+  }
+ },
+ "cache": {
+  "format_version": 1,
+  "compressor": {
+   "cname": "zstd",
+   "clevel": 5,
+   "shuffle": "bit"
+  },
+  "assumed_compressed_fraction": 0.3,
+  "free_space_margin_gib": 20
+ },
+ "augmentation": {
+  "random": {
+   "hflip_prob": 0.5,
+   "zoom_prob": 0.8,
+   "zoom_in_prob": 0.8,
+   "zoom_in_factor": [
+    1.0,
+    1.5
+   ],
+   "zoom_out_factor": [
+    1.0,
+    1.2
+   ]
+  },
+  "stream": {
+   "hflip_prob": 0.5,
+   "zoom_prob": 0.5,
+   "zoom_in_prob": 0.0,
+   "zoom_in_factor": [
+    1.0,
+    1.0
+   ],
+   "zoom_out_factor": [
+    1.0,
+    1.2
+   ]
+  },
+  "min_visible_fraction": 0.3
+ },
+ "sampling": {
+  "pretrain": {
+   "clip_steps": 5,
+   "splits": {
+    "gen4_1mpx": "train"
+   },
+   "random_slots": {
+    "gen4_1mpx": 12
+   },
+   "stream_slots": {
+    "gen4_1mpx": 12
+   }
+  },
+  "finetune": {
+   "clip_steps": 8,
+   "splits": {
+    "dsec_mot": "train",
+    "dsec_detection": "train"
+   },
+   "random_slots": {
+    "dsec_mot": 2,
+    "dsec_detection": 2
+   },
+   "stream_slots": {
+    "dsec_mot": 2,
+    "dsec_detection": 2
+   }
+  }
  }
 }
