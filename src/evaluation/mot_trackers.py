@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -87,6 +87,8 @@ class TrackingConfig:
     per_class: bool = False
     num_classes: int = 7
     cmc_method: str | None = "ecc"
+    # BoT-SORT only: one single-class tracker per class instead of BoxMOT's per_class mode.
+    isolated_classes: bool = False
 
 
 @dataclass
@@ -338,8 +340,23 @@ class BoxMotTracker:
 
     def __init__(self, backend: TrackerBackend, config: TrackingConfig) -> None:
         self.backend = backend
-        self._tracker = _build_boxmot_tracker(backend, config)
         self._dummy_image = np.zeros((480, 640, 3), dtype=np.uint8)
+        self._class_trackers = None
+        if config.isolated_classes:
+            if backend != "boxmot_botsort" or not config.per_class:
+                raise ValueError("isolated_classes needs the boxmot_botsort backend with per_class")
+            # BoxMOT's per_class mode swaps only the active tracks per class, while BoT-SORT
+            # keeps its lost tracks in one shared list, so a lost track of one class can be
+            # re-found by a detection of another class. One single-class tracker per class
+            # keeps every track state separate; all trackers draw IDs from BoxMOT's global
+            # track counter (reset when each tracker is built), so IDs stay unique.
+            single = replace(config, per_class=False, isolated_classes=False)
+            self._class_trackers = [
+                _build_boxmot_tracker(backend, single) for _ in range(config.num_classes)
+            ]
+            self._tracker = self._class_trackers[0]
+        else:
+            self._tracker = _build_boxmot_tracker(backend, config)
 
     def update(
         self,
@@ -366,7 +383,9 @@ class BoxMotTracker:
         else:
             dets = np.empty((0, 6), dtype=np.float32)
 
-        if embeddings is None:
+        if self._class_trackers is not None:
+            results = self._update_isolated(dets, embeddings, frame_index)
+        elif embeddings is None:
             results = self._tracker.update(dets, self._dummy_image)
         else:
             if embeddings.shape[0] != dets.shape[0]:
@@ -388,7 +407,7 @@ class BoxMotTracker:
                 self._tracker.last_emb_size = int(embeddings.shape[1])
             results = self._tracker.update(dets, self._dummy_image, embeddings)
         records: list[TrackedRecord] = []
-        for row in np.asarray(results, dtype=np.float32):
+        for row in np.asarray(results, dtype=np.float32).reshape(-1, 8):
             x1, y1, x2, y2, track_id, score, class_id, _ = row[:8]
             records.append(
                 TrackedRecord(
@@ -404,6 +423,28 @@ class BoxMotTracker:
                 )
             )
         return sorted(records, key=lambda item: item.track_id)
+
+    def _update_isolated(
+        self, dets: np.ndarray, embeddings: np.ndarray | None, frame_index: int
+    ) -> np.ndarray:
+        """Update every class tracker on every frame (empty classes included)."""
+
+        if embeddings is not None and embeddings.shape[0] != dets.shape[0]:
+            raise ValueError(
+                f"Embedding rows ({embeddings.shape[0]}) do not match "
+                f"detections ({dets.shape[0]}) at frame {frame_index}."
+            )
+        outputs = []
+        for class_id, tracker in enumerate(self._class_trackers):
+            mask = dets[:, 5] == class_id
+            if embeddings is None:
+                result = tracker.update(dets[mask], self._dummy_image)
+            else:
+                result = tracker.update(dets[mask], self._dummy_image, embeddings[mask])
+            result = np.asarray(result, dtype=np.float32)
+            if result.size:
+                outputs.append(result.reshape(-1, result.shape[-1])[:, :8])
+        return np.concatenate(outputs) if outputs else np.empty((0, 8), np.float32)
 
 
 def load_detections_by_frame(path: Path) -> list[tuple[int, int, list[DetectionObservation]]]:
