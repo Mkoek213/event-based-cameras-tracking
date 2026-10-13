@@ -198,8 +198,8 @@ def test_shipped_config_is_valid_and_sums_to_the_ceiling():
     }
     assert config["slurm"]["gpu"]["max_wall_hours"] == 47.0
     assert sum(config["stages"][name]["wall_hours"] for name in PILOT) <= budget["phases"]["pilot"]
-    assert config["stages"]["pretrain"]["micro_batches"] is None  # frozen after the pilot
-    assert config["stages"]["finetune"]["micro_batches"] is None
+    assert config["stages"]["pretrain"]["micro_batches"] == 1
+    assert config["stages"]["finetune"]["micro_batches"] == 1
 
 
 @pytest.mark.parametrize(
@@ -384,7 +384,7 @@ def test_complete_plan_and_every_child_command_parses(exp):
         assert "--no-requeue" in command and "--signal=B:USR1@600" in command
         gpu = CONFIG["stages"][stage]["kind"] == "gpu"
         assert ("--gres=gpu:1" in command) == gpu and ("grant-gpu-gh200" in command) == gpu
-    assert any("micro_batches is not frozen" in b for b in by_name["pretrain"]["blocked"])
+    assert not any("micro_batches is not frozen" in b for b in by_name["pretrain"]["blocked"])
     assert by_name["freeze"]["manual"] and by_name["test"]["manual"]
     assert by_name["pilot_pretrain"]["planned_gpu_hours_per_job"] == 2.5
     assert not (exp.state_dir / lem.LEDGER).exists()  # planning writes nothing
@@ -532,7 +532,10 @@ def training_child(exp, name, code, finish=False, attempt="main"):
 
 
 def test_training_resume_pause_stop_rule_and_single_repair(tmp_path, sbatch, monkeypatch):
-    exp = init_experiment(tmp_path)
+    unfrozen = copy.deepcopy(CONFIG)
+    for name in ("pretrain", "finetune"):
+        unfrozen["stages"][name]["micro_batches"] = None
+    exp = init_experiment(tmp_path, config=unfrozen)
     complete_all(exp, *PREP, *PILOT)
     with pytest.raises(lem.ExperimentError, match="micro_batches is not frozen"):
         exp.submit("pretrain")
