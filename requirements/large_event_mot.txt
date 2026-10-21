@@ -1,0 +1,35 @@
+# Large event-based MOT pipeline: pinned dependencies for two environments.
+#
+# GH200 (aarch64, plgrid-gpu-gh200): training, source validation, detection
+# export. Build inside a GH200 job after `module add ML-bundle/25.10`, which
+# provides Python 3.13 and a local torch wheel directory to pip:
+#   pip install --no-cache-dir -r requirements/large_event_mot.txt
+#
+# x86_64 CPU (plgrid): BoT-SORT and TrackEval. Install on top of the project
+# requirements:
+#   pip install --no-cache-dir -r requirements.txt -r requirements/large_event_mot.txt
+#
+# Not installed by pip (see docs/large_event_mot.md):
+#   RVT  https://github.com/uzh-rpg/RVT  commit b80f5683a6e2d5de65d4bde8105d796ccb50dbb1 (MIT),
+#        a plain git checkout passed at runtime as RVT_ROOT.
+#   RVT-B 1Mpx checkpoint https://download.ifi.uzh.ch/rpg/RVT/checkpoints/1mpx/rvt-b.ckpt,
+#        297169732 bytes, SHA-256 65d83e68236e99290757c1305e06da6c0cc650c435eed03cea70e9ffed8a1572.
+
+# --- GH200 (aarch64) ---
+# PyTorch from the ML-bundle/25.10 wheel directory (CUDA 12.9, Python 3.13).
+torch==2.9.0+cu129; platform_machine == "aarch64"
+# The ML-bundle has no torchvision, and the PyPI aarch64 wheel has no CUDA ops,
+# so the CUDA 12.9 build is pinned by URL and hash (cp313, matches the bundle).
+torchvision @ https://download.pytorch.org/whl/cu129/torchvision-0.24.0-cp313-cp313-manylinux_2_28_aarch64.whl#sha256=2184e25d50bf7a3dfd5c6b84765201f952a66d493d3256acb7d0199a2975ae97 ; platform_machine == "aarch64"
+# RVT runtime dependencies for the used modules.
+omegaconf==2.3.0; platform_machine == "aarch64"
+einops==0.8.1; platform_machine == "aarch64"
+numpy==2.2.6; platform_machine == "aarch64"
+# Event data and source-validation mAP.
+h5py==3.16.0; platform_machine == "aarch64"
+hdf5plugin==7.1.0; platform_machine == "aarch64"
+pycocotools==2.0.10; platform_machine == "aarch64"
+
+# --- x86_64 CPU (tracking and evaluation) ---
+boxmot==21.0.0; platform_machine == "x86_64"
+trackeval @ git+https://github.com/JonathonLuiten/TrackEval.git@12c8791b303e0a0b50f753af204249e622d0281a ; platform_machine == "x86_64"

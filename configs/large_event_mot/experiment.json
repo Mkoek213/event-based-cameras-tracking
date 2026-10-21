@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "budget": {
+    "unit": "allocated GPUs x elapsed wall hours",
+    "total_gpu_hours": 400.0,
+    "phases": {
+      "pilot": 10.0,
+      "pretrain": 150.0,
+      "finetune": 30.0,
+      "evaluation": 10.0
+    },
+    "reserve_gpu_hours": 200.0,
+    "reserve_reasons": ["stop_rule_repair", "throughput_shortfall", "job_loss"]
+  },
+  "slurm": {
+    "gpu": {
+      "partition": "plgrid-gpu-gh200",
+      "gpus": 1,
+      "partition_limit_hours": 48.0,
+      "max_wall_hours": 47.0,
+      "per_gpu_share": {"cpus": 72, "mem_gb": 120}
+    },
+    "cpu": {
+      "partition": "plgrid",
+      "partition_limit_hours": 72.0,
+      "max_wall_hours": 71.0
+    },
+    "signal": "B:USR1@600",
+    "pause_margin_hours": 0.25,
+    "job_name_prefix": "lemot"
+  },
+  "stages": {
+    "convert_gen4": {
+      "kind": "cpu",
+      "depends_on": [],
+      "wall_hours": 12.0,
+      "cpus": 32,
+      "mem_gb": 64,
+      "workers": 32
+    },
+    "convert_dsec": {
+      "kind": "cpu",
+      "depends_on": [],
+      "wall_hours": 6.0,
+      "cpus": 16,
+      "mem_gb": 64,
+      "workers": 16
+    },
+    "validate_manifests": {
+      "kind": "cpu",
+      "depends_on": ["convert_gen4", "convert_dsec"],
+      "wall_hours": 4.0,
+      "cpus": 4,
+      "mem_gb": 16
+    },
+    "cache_gen4": {
+      "kind": "cpu",
+      "depends_on": ["validate_manifests"],
+      "wall_hours": 24.0,
+      "cpus": 32,
+      "mem_gb": 96,
+      "workers": 32
+    },
+    "cache_dsec_mot": {
+      "kind": "cpu",
+      "depends_on": ["validate_manifests"],
+      "wall_hours": 4.0,
+      "cpus": 8,
+      "mem_gb": 32,
+      "workers": 8
+    },
+    "cache_dsec_detection": {
+      "kind": "cpu",
+      "depends_on": ["validate_manifests"],
+      "wall_hours": 8.0,
+      "cpus": 16,
+      "mem_gb": 64,
+      "workers": 16
+    },
+    "pilot_preflight": {
+      "kind": "gpu",
+      "phase": "pilot",
+      "depends_on": [],
+      "wall_hours": 0.25,
+      "cpus": 16,
+      "mem_gb": 64
+    },
+    "pilot_pretrain": {
+      "kind": "gpu",
+      "phase": "pilot",
+      "depends_on": ["pilot_preflight", "cache_gen4"],
+      "wall_hours": 2.5,
+      "cpus": 32,
+      "mem_gb": 120,
+      "workers": 16,
+      "memory_probe": {
+        "micro_batches": [1, 2, 3, 4],
+        "steps": 8,
+        "headroom": 0.1,
+        "overrides": [
+          "total_steps=20",
+          "phase_a_steps=1",
+          "lr.warmup_steps=1",
+          "validation.every=20",
+          "checkpoint_every=20"
+        ]
+      },
+      "overrides": [
+        "total_steps=1000",
+        "phase_a_steps=500",
+        "lr.warmup_steps=500",
+        "validation.every=1000",
+        "validation.limit=8",
+        "checkpoint_every=500"
+      ],
+      "pause_at_step": 500
+    },
+    "pilot_finetune": {
+      "kind": "gpu",
+      "phase": "pilot",
+      "depends_on": ["pilot_pretrain", "cache_dsec_mot", "cache_dsec_detection"],
+      "wall_hours": 2.0,
+      "cpus": 32,
+      "mem_gb": 120,
+      "workers": 16,
+      "memory_probe": {
+        "micro_batches": [1, 2],
+        "steps": 8,
+        "headroom": 0.1,
+        "overrides": [
+          "total_steps=20",
+          "phase_a_steps=1",
+          "lr.warmup_steps=1",
+          "validation.points=1",
+          "checkpoint_every=20"
+        ]
+      },
+      "overrides": [
+        "total_steps=600",
+        "validation.points=1",
+        "checkpoint_every=300"
+      ],
+      "pause_at_step": 300,
+      "investigation_note": "pilot: 1,000-step shortened pretraining; its investigation triggers are not meaningful",
+      "export": true
+    },
+    "pretrain": {
+      "kind": "gpu",
+      "phase": "pretrain",
+      "depends_on": ["pilot_pretrain", "pilot_finetune"],
+      "wall_hours": 47.0,
+      "cpus": 32,
+      "mem_gb": 120,
+      "workers": 16,
+      "micro_batches": 1,
+      "overrides": []
+    },
+    "finetune": {
+      "kind": "gpu",
+      "phase": "finetune",
+      "depends_on": ["pretrain", "cache_dsec_mot", "cache_dsec_detection"],
+      "wall_hours": 12.0,
+      "cpus": 32,
+      "mem_gb": 120,
+      "workers": 16,
+      "micro_batches": 1,
+      "overrides": []
+    },
+    "probe": {
+      "kind": "cpu",
+      "depends_on": ["finetune"],
+      "wall_hours": 12.0,
+      "cpus": 16,
+      "mem_gb": 64
+    },
+    "search": {
+      "kind": "cpu",
+      "depends_on": ["probe"],
+      "wall_hours": 71.0,
+      "cpus": 16,
+      "mem_gb": 64,
+      "workers": 16,
+      "threads": 1
+    },
+    "select": {
+      "kind": "cpu",
+      "depends_on": ["search"],
+      "wall_hours": 2.0,
+      "cpus": 4,
+      "mem_gb": 16
+    },
+    "freeze": {
+      "kind": "cpu",
+      "depends_on": ["select"],
+      "wall_hours": 1.0,
+      "cpus": 2,
+      "mem_gb": 8,
+      "manual": true
+    },
+    "test": {
+      "kind": "cpu",
+      "depends_on": ["freeze"],
+      "wall_hours": 6.0,
+      "cpus": 16,
+      "mem_gb": 64,
+      "manual": true
+    }
+  }
+}

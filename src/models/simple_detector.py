@@ -792,11 +792,17 @@ def _class_aware_nms(
     labels: torch.Tensor,
     iou_threshold: float,
     max_detections: int,
+    stable_order: bool = False,
 ) -> list[int]:
     keep: list[int] = []
     for class_id in labels.unique(sorted=True):
         idxs = torch.nonzero(labels == class_id, as_tuple=False).flatten()
-        idxs = idxs[scores[idxs].argsort(descending=True)]
+        order = (
+            scores[idxs].argsort(descending=True, stable=True)
+            if stable_order
+            else scores[idxs].argsort(descending=True)
+        )
+        idxs = idxs[order]
         while idxs.numel() > 0 and len(keep) < max_detections:
             current = int(idxs[0])
             keep.append(current)
@@ -820,8 +826,14 @@ def decode_dense_detections(
     image_height: int = EVENT_HEIGHT,
     feature_stride: int = 8,
     embeddings: torch.Tensor | None = None,
+    stable_nms: bool = False,
 ) -> list[DetectionRecord]:
-    """Decode one model output and optionally attach its per-cell embeddings."""
+    """Decode one model output and optionally attach its per-cell embeddings.
+
+    ``stable_nms`` preserves cell order for equal scores, allowing a low-score
+    cache to reproduce decoding at higher score thresholds. Historical callers
+    retain their original tie ordering unless they explicitly enable this flag.
+    """
     cls_logits = outputs["cls_logits"]
     bbox_raw = outputs["bbox_raw"]
     if cls_logits.ndim == 4:
@@ -860,7 +872,9 @@ def decode_dense_detections(
     ys = ys[valid]
     xs = xs[valid]
 
-    keep = _class_aware_nms(boxes, scores, labels, nms_iou_threshold, max_detections)
+    keep = _class_aware_nms(
+        boxes, scores, labels, nms_iou_threshold, max_detections, stable_order=stable_nms
+    )
     detections: list[DetectionRecord] = []
     for idx in keep:
         box = boxes[idx].detach().cpu()

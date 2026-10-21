@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "losses": {
+    "detection": {
+      "iou_loss_type": "iou",
+      "iou_weight": 5.0,
+      "masked_class_logit": -10000.0
+    },
+    "identity": {
+      "classifier": {"scale": 16.0, "init_std": 0.01},
+      "triplet": {"margin": 0.3},
+      "ce_weight": 1.0,
+      "triplet_weight": 1.0
+    }
+  },
+  "stages": {
+    "pretrain": {
+      "head": "source",
+      "identity": {"enabled": false, "datasets": []},
+      "geometry": "gen4_1mpx",
+      "init": "rvt_checkpoint",
+      "with_embeddings": false,
+      "total_steps": 200000,
+      "phase_a_steps": 2000,
+      "trainable": {
+        "phase_a": ["backbone.stages.0.downsample_cf2cl.", "yolox_head.cls_preds."],
+        "phase_b": ["backbone.", "fpn.", "yolox_head."]
+      },
+      "optimizer": {
+        "betas": [0.9, 0.999],
+        "eps": 1e-08,
+        "weight_decay": 0.0
+      },
+      "lr": {"peak": 0.0002, "warmup_steps": 2000, "schedule": "linear", "final": 2e-08},
+      "grad_clip_norm": 1.0,
+      "precision": "bf16",
+      "ema": {"decay": 0.9999, "ramp_steps": 2000},
+      "checkpoint_every": 2000,
+      "validation": {
+        "kind": "source_map",
+        "dataset": "gen4_1mpx",
+        "split": "val",
+        "every": 10000,
+        "limit": null,
+        "classes": [0, 1, 2, 3, 4],
+        "subset_classes": [0, 1, 2],
+        "score_floor": 0.001,
+        "nms_iou": 0.5,
+        "max_detections": 100,
+        "clip_steps": 5,
+        "lanes": 8,
+        "selection": {"metric": "map", "tie_breaks": ["ap50", "earlier_step"]},
+        "patience": {"evaluations": 6, "min_delta": 0.002},
+        "investigation": {
+          "at_step": 20000,
+          "min_subset_map_at_step": 0.3,
+          "min_best_subset_map": 0.4
+        }
+      }
+    },
+    "finetune": {
+      "head": "target",
+      "identity": {"enabled": true, "datasets": ["dsec_mot"]},
+      "geometry": "dsec_mot",
+      "init": "pretrain_transfer",
+      "with_embeddings": true,
+      "total_steps": 12000,
+      "phase_a_steps": 500,
+      "trainable": {
+        "phase_a": ["embedding_head.", "yolox_head.cls_preds.", "identity_classifier."],
+        "phase_b": ["backbone.", "fpn.", "yolox_head.", "embedding_head.", "identity_classifier."]
+      },
+      "optimizer": {
+        "betas": [0.9, 0.999],
+        "eps": 1e-08,
+        "weight_decay": 0.05
+      },
+      "lr": {"peak": 0.0001, "warmup_steps": 500, "schedule": "cosine", "final": 1e-06},
+      "grad_clip_norm": 1.0,
+      "precision": "bf16",
+      "ema": {"decay": 0.999, "ramp_steps": 2000},
+      "checkpoint_every": 500,
+      "validation": {
+        "kind": "validation_points",
+        "points": 12,
+        "selection": {"dataset": "dsec_mot", "split": "val", "metric": "seven-class HOTA"},
+        "monitor": {
+          "kind": "detection_map",
+          "dataset": "dsec_detection",
+          "split": "val_monitor",
+          "limit": null,
+          "classes": [0, 1, 2, 3, 4, 5],
+          "subset_classes": [],
+          "score_floor": 0.001,
+          "nms_iou": 0.5,
+          "max_detections": 100,
+          "clip_steps": 8,
+          "lanes": 5
+        }
+      }
+    }
+  },
+  "stop_rules": {
+    "nonfinite": {"max_consecutive": 3, "max_in_window": 5, "window_steps": 1000},
+    "identity_sampling": {
+      "window_steps": 500,
+      "min_identity_fraction": 0.95,
+      "min_triplet_fraction": 0.5
+    },
+    "class_coverage": true,
+    "state_reset_check": true
+  },
+  "logging": {"every_steps": 50},
+  "smoke": {
+    "data": {
+      "geometry": {
+        "gen4_1mpx": {"pool": 8, "frame": {"width": 160, "height": 90}, "input": {"width": 160, "height": 96}},
+        "dsec_mot": {"pool": 8, "frame": {"width": 80, "height": 60}, "input": {"width": 96, "height": 64}},
+        "dsec_detection": {"pool": 8, "frame": {"width": 80, "height": 60}, "input": {"width": 96, "height": 64}}
+      },
+      "sampling": {
+        "pretrain": {
+          "clip_steps": 3,
+          "random_slots": {"gen4_1mpx": 2},
+          "stream_slots": {"gen4_1mpx": 2}
+        },
+        "finetune": {
+          "clip_steps": 3,
+          "random_slots": {"dsec_mot": 1, "dsec_detection": 1},
+          "stream_slots": {"dsec_mot": 1, "dsec_detection": 1}
+        }
+      }
+    },
+    "model": {
+      "geometry": {
+        "gen4_1mpx": {"input_hw": [96, 160], "valid_hw": [90, 160], "partition_size": [3, 5]},
+        "dsec_mot": {"input_hw": [64, 96], "valid_hw": [60, 80], "partition_size": [2, 3]},
+        "dsec_detection": {"input_hw": [64, 96], "valid_hw": [60, 80], "partition_size": [2, 3]}
+      }
+    },
+    "sequences": {"steps": 10, "train": 3, "val": 2, "objects": 3, "seed": 0},
+    "stages": {
+      "pretrain": {
+        "init": "random",
+        "total_steps": 6,
+        "phase_a_steps": 2,
+        "lr": {"warmup_steps": 2},
+        "ema": {"ramp_steps": 2},
+        "checkpoint_every": 2,
+        "validation": {"every": 3, "clip_steps": 3, "lanes": 2}
+      },
+      "finetune": {
+        "total_steps": 6,
+        "phase_a_steps": 2,
+        "lr": {"warmup_steps": 2},
+        "ema": {"ramp_steps": 2},
+        "checkpoint_every": 2,
+        "validation": {"points": 2, "monitor": {"clip_steps": 3, "lanes": 2}}
+      }
+    },
+    "stop_rules": {"identity_sampling": {"window_steps": 2}},
+    "logging": {"every_steps": 1}
+  }
+}
