@@ -83,6 +83,7 @@ from src.models.large_event_detector import (
     transfer_source_to_target,
 )
 from src.models.large_event_modules import RecurrentState
+from src.training.large_event_comet import CometConfigError, CometLogger
 from src.training.large_event_losses import (
     DEFAULT_CONFIG as DEFAULT_TRAINING_CONFIG,
 )
@@ -511,6 +512,27 @@ class Trainer:
         )
 
     def run(self) -> int:
+        comet = CometLogger(
+            self.run_dir,
+            {
+                "stage": self.stage,
+                "variant": "repair" if self.run_dir.name == "repair" else "main",
+                "seed": self.inputs.seed,
+                "total_steps": self.settings["total_steps"],
+                "phase_a_steps": self.settings["phase_a_steps"],
+                "batch_size": self.plan.batch_size,
+                "clip_steps": self.plan.steps,
+                "micro_batches": self.micro_batches,
+                "precision": self.settings["precision"],
+                "peak_lr": self.settings["lr"]["peak"],
+                "weight_decay": self.settings["optimizer"]["weight_decay"],
+                "ema_decay": self.settings["ema"]["decay"],
+                "class_count": len(self.model.classes),
+                "identity_enabled": self.settings["identity"]["enabled"],
+            },
+            log=self.log,
+        )
+        self.comet = comet
         total = int(self.settings["total_steps"])
         started, job_start_step = time.time(), self.step
         previous = self._install_signals()
@@ -542,9 +564,12 @@ class Trainer:
             self._log_interval()
             self.log(f"stopping at step {self.step}: {error}")
         finally:
-            for signum, handler in previous:
-                signal.signal(signum, handler)
-            self._record_job(started, job_start_step, reason, code)
+            try:
+                for signum, handler in previous:
+                    signal.signal(signum, handler)
+                self._record_job(started, job_start_step, reason, code)
+            finally:
+                comet.close()
         self.log(f"{self.stage}: {reason} at step {self.step} (exit {code})")
         return code
 
@@ -711,6 +736,8 @@ class Trainer:
         if self.device.type == "cuda":
             record["device_peak_mib"] = torch.cuda.max_memory_allocated(self.device) / 2**20
         append_jsonl(self.run_dir / "metrics.jsonl", record)
+        if getattr(self, "comet", None) is not None:
+            self.comet.training(record)
         loss = record["loss"].get("total", float("nan"))
         self.log(
             f"step {self.step} {record['phase']} lr {record['lr']:.3g} loss {loss:.4f} "
@@ -793,15 +820,15 @@ class Trainer:
                 f"{investigation['min_subset_map_at_step']} at step {self.step}"
             )
         self._write_selection()
-        append_jsonl(
-            self.run_dir / "validation.jsonl",
-            {
-                "step": self.step,
-                "kind": "source_map",
-                "metrics": metrics,
-                "best": selection["best"],
-            },
-        )
+        record = {
+            "step": self.step,
+            "kind": "source_map",
+            "metrics": metrics,
+            "best": selection["best"],
+        }
+        append_jsonl(self.run_dir / "validation.jsonl", record)
+        if getattr(self, "comet", None) is not None:
+            self.comet.validation(record, selection)
         self.log(
             f"step {self.step}: source mAP {metrics['map']} AP50 {metrics['ap50']} "
             f"3-class {metrics.get('subset_map')} (best step {selection['best']['step']})"
@@ -825,10 +852,10 @@ class Trainer:
             }
         )
         self._write_selection()
-        append_jsonl(
-            self.run_dir / "validation.jsonl",
-            {"step": self.step, "kind": "validation_point", "point": point, "monitor": monitor},
-        )
+        record = {"step": self.step, "kind": "validation_point", "point": point, "monitor": monitor}
+        append_jsonl(self.run_dir / "validation.jsonl", record)
+        if getattr(self, "comet", None) is not None:
+            self.comet.validation(record, self.selection)
         self.log(
             f"step {self.step}: validation point {point} saved; DSEC-Detection monitor mAP "
             f"{None if monitor is None else monitor['map']}"
@@ -1151,6 +1178,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             log=lambda message: print(message, flush=True),
         )
     except (
+        CometConfigError,
         RuntimeConfigError,
         SchemaError,
         CacheError,
@@ -1160,7 +1188,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    return trainer.run()
+    try:
+        return trainer.run()
+    except CometConfigError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
